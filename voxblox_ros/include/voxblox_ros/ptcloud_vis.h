@@ -166,6 +166,7 @@ void createOccupancyBlocksFromLayer(
         block_marker.points.push_back(cube_center);
         std_msgs::ColorRGBA color_msg;
         colorVoxbloxToMsg(rainbowColorMap((coord.z() + 2.5) / 5.0), &color_msg);
+        // color_msg.a = 0.9;
         block_marker.colors.push_back(color_msg);
       }
     }
