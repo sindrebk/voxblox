@@ -471,6 +471,7 @@ void TsdfServer::publishMap(bool reset_remote_map) {
       // subscribes. A bit of overhead for other subscribers, but better than
       // inconsistent map states.
       reset_remote_map = true;
+      ROS_WARN("New subscriber to tsdf_map_, resetting remote map.");
     }
     const bool only_updated = !reset_remote_map;
     timing::Timer publish_map_timer("map/publish_tsdf");

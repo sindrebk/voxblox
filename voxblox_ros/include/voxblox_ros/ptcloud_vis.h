@@ -205,7 +205,8 @@ inline bool visualizeDistanceIntensityTsdfVoxels(const TsdfVoxel& voxel,
   CHECK_NOTNULL(intensity);
   constexpr float kMinWeight = 1e-3;
   if (voxel.weight > kMinWeight) {
-    *intensity = voxel.distance;
+    // *intensity = voxel.distance;
+    *intensity = voxel.color.r;
     return true;
   }
   return false;
