@@ -5,6 +5,7 @@
 
 #include "voxblox_ros/conversions.h"
 #include "voxblox_ros/ros_params.h"
+#include <chrono>
 
 namespace voxblox {
 
@@ -112,7 +113,18 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
 
   icp_.reset(new ICP(getICPConfigFromRosParam(nh_private)));
 
+  // compute frustum end points
+  camera_param.max_range = 5.0;
+  camera_param.min_range = 0.1;
+  camera_param.fov << 90.0 * M_PI / 180.0, 65.0 * M_PI / 180.0;
+  camera_param.resolution << 5.0 * M_PI / 180.0, 5.0 * M_PI / 180.0;
+  camera_param.initialize();
+
+  sdf_layer_ = getTsdfMapPtr()->getTsdfLayerPtr();
+
   // Advertise services.
+  calc_info_gain_srv_ = nh_private_.advertiseService(
+      "calc_info_gain", &TsdfServer::calcInfoGainCallback, this);
   generate_mesh_srv_ = nh_private_.advertiseService(
       "generate_mesh", &TsdfServer::generateMeshCallback, this);
   clear_map_srv_ = nh_private_.advertiseService(
@@ -628,6 +640,7 @@ void TsdfServer::publishMapEvent(const ros::TimerEvent& /*event*/) {
 void TsdfServer::clear() {
   tsdf_map_->getTsdfLayerPtr()->removeAllBlocks();
   mesh_layer_->clear();
+  interesting_voxels.clear();
 
   // Publish a message to reset the map to all subscribers.
   if (publish_tsdf_map_) {
@@ -650,6 +663,390 @@ void TsdfServer::tsdfMapCallback(const voxblox_msgs::Layer& layer_msg) {
       publishPointclouds();
     }
   }
+}
+
+void TsdfServer::integratePointcloud(const Transformation& T_G_C,
+                                     const Pointcloud& ptcloud_C,
+                                     const Colors& colors,
+                                     const Interestingness& interestingness,
+                                     std::vector<GlobalIndex>& interesting_voxel_idx,
+                                     const bool is_freespace_pointcloud) {
+  CHECK_EQ(ptcloud_C.size(), colors.size());
+  tsdf_integrator_->integratePointCloudWithInterestingness(T_G_C, ptcloud_C, colors,
+                                        interestingness, interesting_voxel_idx,
+                                        is_freespace_pointcloud);                                      
+}
+
+void TsdfServer::lightProcessPointCloudMessageAndInsert(
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::vector<GlobalIndex>& interesting_voxel_idx,
+    const Transformation& T_G_C, const bool is_freespace_pointcloud) {
+  Pointcloud points_C;
+  Colors colors;
+  Interestingness interestingness;
+  timing::Timer ptcloud_timer("ptcloud_preprocess");
+  pcl::PointCloud<pcl::PointXYZI> pointcloud_pcl;
+  // pointcloud_pcl is modified below:
+  pcl::fromROSMsg(*pointcloud_msg, pointcloud_pcl);
+  convertPointcloud(pointcloud_pcl, color_map_, &points_C, &colors, &interestingness);
+
+  ptcloud_timer.Stop();
+
+  Transformation T_G_C_refined = T_G_C;
+
+  if (verbose_) {
+    ROS_INFO("Integrating a pointcloud with %lu points.", points_C.size());
+  }
+
+  ros::WallTime start = ros::WallTime::now();
+  integratePointcloud(T_G_C_refined, points_C, colors, interestingness, interesting_voxel_idx, is_freespace_pointcloud);
+  ros::WallTime end = ros::WallTime::now();
+
+  if (verbose_) {
+    ROS_INFO("Finished integrating in %f seconds, have %lu blocks.",
+             (end - start).toSec(),
+             tsdf_map_->getTsdfLayer().getNumberOfAllocatedBlocks());
+  }
+}
+
+void TsdfServer::lightInsertPointcloud(
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in, std::vector<GlobalIndex>& interesting_voxel_idx) {
+  Transformation T_G_C;
+  T_G_C.setIdentity();
+
+  constexpr bool is_freespace_pointcloud = false;
+  lightProcessPointCloudMessageAndInsert(pointcloud_msg_in, interesting_voxel_idx, T_G_C,
+                                    is_freespace_pointcloud);
+
+  if (publish_pointclouds_on_update_) {
+    publishPointclouds();
+  }
+
+  if (verbose_) {
+    ROS_INFO_STREAM("Timings: " << std::endl << timing::Timing::Print());
+    ROS_INFO_STREAM(
+        "Layer memory: " << tsdf_map_->getTsdfLayer().getMemorySize());
+  }
+}
+
+void SensorParamsBase::getFrustumEndpoints(StateVec& state,
+                                           std::vector<Eigen::Vector3d>& ep) {
+  // Convert rays from B to W.
+  Eigen::Vector3d origin(state[0], state[1], state[2]);
+  Eigen::Matrix3d rot_W2B;
+  rot_W2B = Eigen::AngleAxisd(state[5], Eigen::Vector3d::UnitZ()) *
+            Eigen::AngleAxisd(state[4], Eigen::Vector3d::UnitY()) *
+            Eigen::AngleAxisd(state[3], Eigen::Vector3d::UnitX());
+  ep.clear();
+  for (auto& p : frustum_endpoints_B) {
+    Eigen::Vector3d p_tf = origin + rot_W2B * p;
+    ep.push_back(p_tf);
+  }
+}
+
+void SensorParamsBase::initialize() {
+  double v_res, h_res;
+  v_res = (resolution[1] > 0) ? resolution[1] : (1.0 * M_PI / 180.0);
+  h_res = (resolution[0] > 0) ? resolution[0] : (1.0 * M_PI / 180.0);
+  // Compute the normal vectors enclosed the FOV.
+
+  // Compute 4 normal vectors for left, right, top, down planes.
+  // First, compute 4 coner points.
+  // Assume the range is along the hypotenuse of the right angle.
+  double h_2 = fov[0] / 2;
+  double v_2 = fov[1] / 2;
+  Eigen::Vector3d pTL(cos(h_2), sin(h_2), sin(v_2));
+  Eigen::Vector3d pTR(cos(h_2), -sin(h_2), sin(v_2));
+  Eigen::Vector3d pBR(cos(h_2), -sin(h_2), -sin(v_2));
+  Eigen::Vector3d pBL(cos(h_2), sin(h_2), -sin(v_2));
+  edge_points.col(0) = pTL;
+  edge_points.col(1) = pTR;
+  edge_points.col(2) = pBR;
+  edge_points.col(3) = pBL;
+  // Compute normal vectors for 4 planes. (normalized)
+  normal_vectors.col(0) = edge_points.col(0).cross(edge_points.col(1));
+  normal_vectors.col(1) = edge_points.col(1).cross(edge_points.col(2));
+  normal_vectors.col(2) = edge_points.col(2).cross(edge_points.col(3));
+  normal_vectors.col(3) = edge_points.col(3).cross(edge_points.col(0));
+  // Compute correct points based on the sensor range.
+  edge_points = max_range * edge_points;
+  // edge_points_B = rot_B2S * edge_points;
+  edge_points_B = edge_points;
+  // Frustum endpoints in (S) for gain calculation.
+  frustum_endpoints.clear();
+  frustum_endpoints_B.clear();
+  int w = 0, h = 0;
+  height = 0;
+  width = 0;
+  double h_lim_2 = fov[0] / 2;
+  double v_lim_2 = fov[1] / 2;
+  for (double dv = -v_lim_2; dv < v_lim_2; dv += v_res) {
+    ++h;
+    for (double dh = -h_lim_2; dh < h_lim_2; dh += h_res) {
+      if (width == 0) {
+        ++w;
+      }
+      double x = max_range * cos(dh);
+      double y = max_range * sin(dh);
+      double z = max_range * sin(dv);
+      Eigen::Vector3d ep = Eigen::Vector3d(x, y, z);
+      frustum_endpoints.push_back(ep);
+      // Eigen::Vector3d ep_B = rot_B2S * ep + center_offset;
+      Eigen::Vector3d ep_B = ep;
+      frustum_endpoints_B.push_back(ep_B);
+    }
+    if (width == 0) {
+      width = w;
+    }
+  }
+  height = h;
+  ROS_INFO_STREAM("Computed multiray_endpoints for volumetric gain [kCamera]:" 
+                  << frustum_endpoints_B.size() << " points");
+}
+
+bool TsdfServer::checkUnknownStatus(
+    const voxblox::TsdfVoxel* voxel) const {
+  if (voxel == nullptr || voxel->weight < 1e-6) {
+    return true;
+  }
+  return false;
+}
+
+float TsdfServer::getScanStatus(
+    Eigen::Vector3d& pos, std::vector<Eigen::Vector3d>& multiray_endpoints,
+    std::tuple<int, int, int>& gain_log,
+    std::vector<std::pair<Eigen::Vector3d, VoxelStatus>>& voxel_log,
+    SensorParamsBase& sensor_params) {
+  unsigned int num_unknown_voxels = 0, num_free_voxels = 0,
+               num_occupied_voxels = 0;
+  float interestingness = 0.0f;
+  const float voxel_size = sdf_layer_->voxel_size();
+  const float voxel_size_inv = 1.0 / voxel_size;
+  // const float step_size_change_dist =
+  //     4.0;  // After every these many meters increase the ray interpolation
+  //           // distance
+  // const float step_size_change_dist_end =
+  //     12.0;  // After this much distance stick to the last interpolation
+  //            // distance
+
+  const voxblox::Point start_scaled =
+      pos.cast<voxblox::FloatingPoint>() * voxel_size_inv;
+  // const float distance_thres =
+      // occupancy_distance_voxelsize_factor_ * sdf_layer_->voxel_size() + 1e-6;
+  const float distance_thres = sdf_layer_->voxel_size() + 1e-6;
+
+  // NOTES: no optimization / no twice-counting considerations possible without
+  // refactoring planning strategy here
+
+  // Iterate for every endpoint, insert unknown voxels found over every ray into
+  // a set to avoid double-counting Important: do not use <VoxelIndex> type
+  // directly, will break voxblox's implementations
+  // Move away from std::unordered_set and work with std::vector + std::unique
+  // count at the end (works best for now)
+  /*std::vector<std::size_t> raycast_unknown_vec_, raycast_occupied_vec_,
+  raycast_free_vec_; raycast_unknown_vec_.reserve(multiray_endpoints.size() *
+  tsdf_integrator_config_.max_ray_length_m * voxel_size_inv); //optimize for
+  number of rays raycast_free_vec_.reserve(multiray_endpoints.size() *
+  tsdf_integrator_config_.max_ray_length_m * voxel_size_inv); //optimize for
+  number of rays raycast_occupied_vec_.reserve(multiray_endpoints.size());
+  //optimize for number of rays*/
+  // voxel_log.reserve(multiray_endpoints.size() *
+  // tsdf_integrator_config_.max_ray_length_m * voxel_size_inv); //optimize for
+  // number of rays
+  for (size_t i = 0; i < multiray_endpoints.size(); ++i) {
+    float step_size = voxel_size;//* ray_cast_step_size_multiplier_;
+    float step_size_inv = 1.0 / step_size;
+    float og_step_size = step_size;
+    Eigen::Vector3d ray_normalized =
+        (multiray_endpoints[i] - pos);  // Not yet noramlized
+    double ray_norm = ray_normalized.norm();
+    ray_normalized = ray_normalized / ray_norm;  // Normalized here
+    // Iterate over the ray.
+    double prev_step_dist = 0.0;
+    for (double step = 0.0; step <= ray_norm; step += step_size) {
+      // if (nonuniform_ray_cast_) {
+      //   if (std::abs(prev_step_dist - step) > step_size_change_dist &&
+      //       step <= step_size_change_dist_end) {
+      //     prev_step_dist = step;
+      //     step_size += og_step_size;
+      //   }
+      // }
+      Eigen::Vector3d voxel_coordi = (pos + ray_normalized * step);
+      voxblox::LongIndex global_index =
+          voxblox::getGridIndexFromPoint<voxblox::LongIndex>(
+              voxel_coordi.cast<voxblox::FloatingPoint>(), voxel_size_inv);
+      voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
+      // Unknown
+      if (checkUnknownStatus(voxel)) {
+        /*raycast_unknown_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
+        ++num_unknown_voxels;
+        if (voxel != nullptr) {
+          interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF UNKNOWN VOXEL
+        }
+        voxel_log.push_back(std::make_pair(
+            voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+                .cast<double>(),
+            VoxelStatus::kUnknown));
+        continue;
+      }
+      // Free
+      if (voxel->distance > distance_thres) {
+        /*raycast_free_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
+        ++num_free_voxels;
+        voxel_log.push_back(std::make_pair(
+            voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+                .cast<double>(),
+            VoxelStatus::kFree));
+        continue;
+      }
+      // Occupied
+      /*raycast_occupied_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
+      ++num_occupied_voxels;
+      // interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF OCCUPIED VOXEL
+      voxel_log.push_back(std::make_pair(
+          voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+              .cast<double>(),
+          VoxelStatus::kOccupied));
+      break;
+    }
+  }
+  /*std::sort(raycast_unknown_vec_.begin(), raycast_unknown_vec_.end());
+  std::sort(raycast_occupied_vec_.begin(), raycast_occupied_vec_.end());
+  std::sort(raycast_free_vec_.begin(), raycast_free_vec_.end());
+  num_unknown_voxels = std::unique(raycast_unknown_vec_.begin(),
+  raycast_unknown_vec_.end()) - raycast_unknown_vec_.begin();
+  num_occupied_voxels = std::unique(raycast_occupied_vec_.begin(),
+  raycast_occupied_vec_.end()) - raycast_occupied_vec_.begin();
+  num_free_voxels = std::unique(raycast_free_vec_.begin(),
+  raycast_free_vec_.end()) - raycast_free_vec_.begin();*/
+  gain_log =
+      std::make_tuple(num_unknown_voxels, num_free_voxels, num_occupied_voxels);
+  return interestingness;
+}
+
+void TsdfServer::computeVolumetricGainRayModelNoBound(StateVec& state,
+                                               VolumetricGain& vgain) {
+  vgain.reset();
+
+  // std::vector<std::tuple<int, int, int>> gain_log;
+  std::vector<std::pair<Eigen::Vector3d, VoxelStatus>> voxel_log;
+  // @TODO tung.
+  // Compute for each sensor in the exploration sensor list.
+  // However, this would be a problem if those sensors have significant overlap.
+
+
+  Eigen::Vector3d origin(state[0], state[1], state[2]);
+  std::tuple<int, int, int> gain_log_tmp;
+  std::vector<std::pair<Eigen::Vector3d, VoxelStatus>> voxel_log_tmp;
+  std::vector<Eigen::Vector3d> multiray_endpoints;
+  camera_param.getFrustumEndpoints(state, multiray_endpoints);
+  float interestingness = getScanStatus(origin, multiray_endpoints, gain_log_tmp,
+                              voxel_log_tmp,
+                              camera_param);
+  // int num_unknown_voxels = 0, num_free_voxels = 0, num_occupied_voxels = 0;
+  // Have to remove those not belong to the local bound.
+  // At the same time check if this is frontier.
+
+  // DO WE NEED THIS ???????
+  // for (auto& vl : voxel_log_tmp) {
+  //   Eigen::Vector3d voxel = vl.first;
+  //   VoxelStatus vs = vl.second;
+  //   if (vs == VoxelStatus::kUnknown) {
+  //     ++num_unknown_voxels;
+  //   } else if (vs == VoxelStatus::kFree) {
+  //     ++num_free_voxels;
+  //   } else if (vs == VoxelStatus::kOccupied) {
+  //     ++num_occupied_voxels;
+  //   } else {
+  //     ROS_ERROR("Unsupported voxel type.");
+  //   }
+  // }
+
+  // ROS_INFO_STREAM("num_unknown_voxels:" << num_unknown_voxels
+  //                 << ", num_free_voxels:" << num_free_voxels
+  //                 << ", num_occupied_voxels:" << num_occupied_voxels);
+
+  vgain.num_unknown_voxels = std::get<0>(gain_log_tmp);//num_unknown_voxels;
+  vgain.num_free_voxels = std::get<1>(gain_log_tmp);//num_free_voxels;
+  vgain.num_occupied_voxels = std::get<2>(gain_log_tmp);//num_occupied_voxels;  
+  vgain.gain = interestingness;
+}
+
+void TsdfServer::spreadInterestingness(GlobalIndex global_index) {
+  voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
+  CHECK_NOTNULL(voxel);
+
+  AlignedQueue<GlobalIndex> voxel_queue;
+  voxel_queue.push(global_index);
+  
+  while (!voxel_queue.empty()) {
+    // Get the global indices of neighbors.
+    const GlobalIndex global_index_tmp = voxel_queue.front();
+    voxel_queue.pop();
+    voxblox::TsdfVoxel* parent_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index_tmp);
+    Neighborhood<>::IndexMatrix neighbor_indices;
+    Neighborhood<>::getFromGlobalIndex(global_index_tmp, &neighbor_indices);
+
+    // Go through the neighbors and see if we can update any of them.
+    for (unsigned int idx = 0u; idx < neighbor_indices.cols(); ++idx) {
+      const GlobalIndex& neighbor_index = neighbor_indices.col(idx);
+      voxblox::TsdfVoxel* neighbor_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(neighbor_index);        
+      if (neighbor_voxel == nullptr) { // can miss some unknown here!
+        continue;
+      }
+      // update interesting level if this's unknown voxel and need to be updated
+      if (checkUnknownStatus(neighbor_voxel)) {
+        if (neighbor_voxel->interesting_distance > parent_voxel->interesting_distance + 1) {
+          neighbor_voxel->interesting_distance = parent_voxel->interesting_distance + 1;
+          neighbor_voxel->interestingness = exp(-0.5 * parent_voxel->interesting_distance);
+        }
+        if (neighbor_voxel->interesting_distance < 5.0) { // stop the spreading when the voxel is too far away from the original interesting voxel
+          voxel_queue.push(neighbor_index);
+        }
+      }
+    }
+  }
+}
+
+bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
+                                      voxblox_msgs::InfoGain::Response& response) {  // NOLINT
+  StateVec state_vec;
+  int32_t num_cam_poses = request.camera_poses.size() / 6;
+  int32_t idx = 0;
+  response.info_gain.reserve(num_cam_poses);
+  // integrate the pcl
+  // auto start = std::chrono::steady_clock::now();
+  sensor_msgs::PointCloud2::Ptr pcl_in = boost::make_shared<sensor_msgs::PointCloud2>(request.pcl);
+  lightInsertPointcloud(pcl_in, interesting_voxels);
+  
+  // spread interestingness out
+  for (idx = 0; idx < interesting_voxels.size(); idx++) {
+    // get the global index by coordinate
+    // get the voxel, set interesting_distance = 0
+    spreadInterestingness(interesting_voxels[idx]);
+  }
+
+  // calculate info gain
+  // auto end1 = std::chrono::steady_clock::now();
+  for (idx = 0; idx < 6 * num_cam_poses; idx = idx + 6) {
+    // calculate the gain by ray castingsolve_time_average_
+    state_vec << request.camera_poses[idx], request.camera_poses[idx + 1],
+                 request.camera_poses[idx + 2], request.camera_poses[idx + 3],
+                 request.camera_poses[idx + 4], request.camera_poses[idx + 5];
+    computeVolumetricGainRayModelNoBound(state_vec, vgain);
+    response.info_gain.push_back(vgain.gain);
+  }
+  
+  // clear the map
+  // auto end2 = std::chrono::steady_clock::now();
+  clear();
+  // auto end3 = std::chrono::steady_clock::now();
+  // std::chrono::duration<double> elapsed_seconds_integrate = end1 - start;
+  // std::chrono::duration<double> elapsed_seconds_info_gain = end2 - end1;
+  // std::chrono::duration<double> elapsed_seconds_clear = end3 - end2;
+  // std::cout << "INTEGRATE time: " << elapsed_seconds_integrate.count() << "s\n";
+  // std::cout << "INFO_GAIN time: " << elapsed_seconds_info_gain.count() << "s\n";
+  // std::cout << "CLEAR time: " << elapsed_seconds_clear.count() << "s\n";
+  return true;
 }
 
 }  // namespace voxblox

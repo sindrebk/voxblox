@@ -13,6 +13,10 @@ struct TsdfVoxel {
   float distance = 0.0f;
   float weight = 0.0f;
   Color color;
+  float interestingness = 0.0f;
+  float interesting_distance = std::numeric_limits<float>::max();
+  float interesting_weight = 0.0f;
+  bool in_queue = false;
 };
 
 struct EsdfVoxel {

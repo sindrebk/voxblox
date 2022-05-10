@@ -24,6 +24,7 @@
 #include <voxblox/mesh/mesh_integrator.h>
 #include <voxblox/utils/color_maps.h>
 #include <voxblox_msgs/FilePath.h>
+#include <voxblox_msgs/InfoGain.h>
 #include <voxblox_msgs/Mesh.h>
 
 #include "voxblox_ros/mesh_vis.h"
@@ -33,6 +34,88 @@
 namespace voxblox {
 
 constexpr float kDefaultMaxIntensity = 100.0;
+
+typedef Eigen::Matrix<double, 6, 1> StateVec;
+
+enum VoxelStatus { kUnknown = 0, kOccupied, kFree };
+
+struct VolumetricGain {
+  VolumetricGain()
+      : gain(0),
+        accumulative_gain(0),
+        num_unknown_voxels(0),
+        num_free_voxels(0),
+        num_occupied_voxels(0),
+        num_unknown_surf_voxels(0) {}
+
+  void reset() {
+    gain = 0;
+    accumulative_gain = 0;
+    num_unknown_voxels = 0;
+    num_free_voxels = 0;
+    num_occupied_voxels = 0;
+    num_unknown_surf_voxels = 0;
+    is_frontier = false;
+    unseen_voxel_hash_keys.clear();
+  }
+
+  double gain;
+  double accumulative_gain;
+  int num_unknown_voxels;
+  int num_free_voxels;
+  int num_occupied_voxels;
+  int num_unknown_surf_voxels;
+  std::vector<std::size_t> unseen_voxel_hash_keys;
+
+  bool is_frontier;
+
+  void printGain() {
+    std::cout << "Gains: " << gain << ", " << num_unknown_voxels << ", "
+              << num_occupied_voxels << ", " << num_free_voxels << std::endl;
+  }
+};
+
+struct SensorParamsBase {
+  double min_range;  // Minimum range for map annotation (used for zoom camera
+                    // only).
+  double max_range;  // Maximum range for volumetric gain.
+  Eigen::Vector2d fov;            // [Horizontal, Vertical] angles (rad).
+  Eigen::Vector2d resolution;  // Resolution in rad [H x V] for volumetric gain.
+  int height;                      // Number of rays in vertical direction
+  int width;                       // Number of rays in horizontal direction
+  int heightRemoval;  // Number of pixel which are not seen on each side in
+                      // vertical direction.
+  int widthRemoval;   // Number of pixel which are not seen on each side in
+                      // horizontal direction.
+  void initialize();
+  // Check if this state is inside sensor's FOV.
+  // pos in (W).
+  // bool isInsideFOV(StateVec& state, Eigen::Vector3d& pos);
+  // Get all endpoints from ray casting models in (W).
+  void getFrustumEndpoints(StateVec& state, std::vector<Eigen::Vector3d>& ep);
+  // void getFrustumEndpoints(StateVec& state, std::vector<Eigen::Vector3d>& ep,
+  //                         float darkness_range);
+
+  // void updateFrustumEndpoints();
+  // Get all edges in (W).
+  // void getFrustumEdges(StateVec& state, std::vector<Eigen::Vector3d>& edges);
+  // Check if this is potential frontier given sensor FOV.
+
+private:
+
+  // These are to support camera model, approximate as a pyramid.
+  // TopLeft, TopRight, BottomRight, BottomLeft.
+  Eigen::Matrix<double, 3, 4> edge_points;    // Sensor coordinate, normalized.
+  Eigen::Matrix<double, 3, 4> edge_points_B;  // Body coordinate, normalized.
+  // These are to support camera model.
+  // Place all 4 {top, right, bottom, left} vector into a matrix.
+  Eigen::Matrix<double, 3, 4> normal_vectors;
+
+  std::vector<Eigen::Vector3d> frustum_endpoints;    // Sensor coordinate.
+  std::vector<Eigen::Vector3d> frustum_endpoints_B;  // Body coordinate.
+
+  double num_voxels_full_fov;
+};
 
 class TsdfServer {
  public:
@@ -78,7 +161,6 @@ class TsdfServer {
   virtual void publishMap(bool reset_remote_map = false);
   virtual bool saveMap(const std::string& file_path);
   virtual bool loadMap(const std::string& file_path);
-
   bool clearMapCallback(std_srvs::Empty::Request& request,           // NOLINT
                         std_srvs::Empty::Response& response);        // NOLINT
   bool saveMapCallback(voxblox_msgs::FilePath::Request& request,     // NOLINT
@@ -119,6 +201,39 @@ class TsdfServer {
   /// Overwrites the layer with what's coming from the topic!
   void tsdfMapCallback(const voxblox_msgs::Layer& layer_msg);
 
+  // custom info gain calculation
+  void integratePointcloud(const Transformation& T_G_C,
+                            const Pointcloud& ptcloud_C,
+                            const Colors& colors,
+                            const Interestingness& interestingness,
+                            std::vector<GlobalIndex>& interesting_voxel_idx,
+                            const bool is_freespace_pointcloud);  
+  void lightInsertPointcloud(const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in,
+    std::vector<GlobalIndex>& interesting_voxel_idx);
+
+  virtual void lightProcessPointCloudMessageAndInsert(
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::vector<GlobalIndex>& interesting_voxel_idx,
+    const Transformation& T_G_C, const bool is_freespace_pointcloud);
+
+  bool calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
+                            voxblox_msgs::InfoGain::Response& response);
+
+  void computeVolumetricGainRayModelNoBound(StateVec& state,
+                                            VolumetricGain& vgain);
+
+  float getScanStatus(
+      Eigen::Vector3d& pos, std::vector<Eigen::Vector3d>& multiray_endpoints,
+      std::tuple<int, int, int>& gain_log,
+      std::vector<std::pair<Eigen::Vector3d, VoxelStatus>>& voxel_log,
+      SensorParamsBase& sensor_params);
+
+  void spreadInterestingness(GlobalIndex global_index);    
+
+  bool checkUnknownStatus(const voxblox::TsdfVoxel* voxel) const;
+
+  voxblox::Layer<voxblox::TsdfVoxel>* sdf_layer_;
+  std::vector<GlobalIndex> interesting_voxels;
+
  protected:
   /**
    * Gets the next pointcloud that has an available transform to process from
@@ -150,6 +265,7 @@ class TsdfServer {
   ros::Subscriber tsdf_map_sub_;
 
   // Services.
+  ros::ServiceServer calc_info_gain_srv_;
   ros::ServiceServer generate_mesh_srv_;
   ros::ServiceServer clear_map_srv_;
   ros::ServiceServer save_map_srv_;
@@ -259,6 +375,10 @@ class TsdfServer {
 
   /// Current transform corrections from ICP.
   Transformation icp_corrected_transform_;
+
+  // Info gain calculation
+  SensorParamsBase camera_param;
+  VolumetricGain vgain;
 };
 
 }  // namespace voxblox

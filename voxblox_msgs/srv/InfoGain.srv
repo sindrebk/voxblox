@@ -1,0 +1,4 @@
+sensor_msgs/PointCloud2 pcl 
+float32[] camera_poses # [x1, y1, z1, roll1, pitch1, yaw1, x2, ...] compared to the map frame
+-------
+float32[] info_gain

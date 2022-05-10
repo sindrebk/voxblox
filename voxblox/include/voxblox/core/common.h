@@ -66,6 +66,7 @@ struct Color;
 // Pointcloud types for external interface.
 typedef AlignedVector<Point> Pointcloud;
 typedef AlignedVector<Color> Colors;
+typedef AlignedVector<float> Interestingness;
 
 // For triangle meshing/vertex access.
 typedef size_t VertexIndex;

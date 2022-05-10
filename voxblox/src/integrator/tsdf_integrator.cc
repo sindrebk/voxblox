@@ -208,6 +208,88 @@ void TsdfIntegratorBase::updateTsdfVoxel(const Point& origin,
   tsdf_voxel->weight = std::min(config_.max_weight, new_weight);
 }
 
+void TsdfIntegratorBase::updateTsdfVoxel(const Point& origin,
+                                         const Point& point_G,
+                                         const GlobalIndex& global_voxel_idx,
+                                         const Color& color, const float interestingness,
+                                         std::vector<GlobalIndex>& interesting_voxel_idx,
+                                         const float weight,
+                                         TsdfVoxel* tsdf_voxel) {
+  DCHECK(tsdf_voxel != nullptr);
+  std::cout << "updateTsdfVoxel 0" << std::endl;
+  const Point voxel_center =
+      getCenterPointFromGridIndex(global_voxel_idx, voxel_size_);
+
+  const float sdf = computeDistance(origin, point_G, voxel_center);
+
+  float updated_weight = weight;
+  // Compute updated weight in case we use weight dropoff. It's easier here
+  // that in getVoxelWeight as here we have the actual SDF for the voxel
+  // already computed.
+  const FloatingPoint dropoff_epsilon = voxel_size_;
+  if (config_.use_weight_dropoff && sdf < -dropoff_epsilon) {
+    updated_weight = weight * (config_.default_truncation_distance + sdf) /
+                     (config_.default_truncation_distance - dropoff_epsilon);
+    updated_weight = std::max(updated_weight, 0.0f);
+  }
+  std::cout << "updateTsdfVoxel 1" << std::endl;
+  // Compute the updated weight in case we compensate for sparsity. By
+  // multiplicating the weight of occupied areas (|sdf| < truncation distance)
+  // by a factor, we prevent to easily fade out these areas with the free
+  // space parts of other rays which pass through the corresponding voxels.
+  // This can be useful for creating a TSDF map from sparse sensor data (e.g.
+  // visual features from a SLAM system). By default, this option is disabled.
+  if (config_.use_sparsity_compensation_factor) {
+    if (std::abs(sdf) < config_.default_truncation_distance) {
+      updated_weight *= config_.sparsity_compensation_factor;
+    }
+  }
+
+  // Lookup the mutex that is responsible for this voxel and lock it
+  std::lock_guard<std::mutex> lock(mutexes_.get(global_voxel_idx));
+
+  const float new_weight = tsdf_voxel->weight + updated_weight;
+
+  // it is possible to have weights very close to zero, due to the limited
+  // precision of floating points dividing by this small value can cause nans
+  if (new_weight < kFloatEpsilon) {
+    return;
+  }
+
+  const float new_sdf =
+      (sdf * updated_weight + tsdf_voxel->distance * tsdf_voxel->weight) /
+      new_weight;
+
+  // color blending is expensive only do it close to the surface
+  // if (std::abs(sdf) < config_.default_truncation_distance) {
+  //   tsdf_voxel->color = Color::blendTwoColors(
+  //       tsdf_voxel->color, tsdf_voxel->weight, color, updated_weight);
+  // }
+  tsdf_voxel->distance =
+      (new_sdf > 0.0) ? std::min(config_.default_truncation_distance, new_sdf)
+                      : std::max(-config_.default_truncation_distance, new_sdf);
+  tsdf_voxel->weight = std::min(config_.max_weight, new_weight);
+  
+  // only assign interestingness to occupied voxel in the ray
+  std::cout << "updateTsdfVoxel 2" << std::endl;
+  if (tsdf_voxel->distance < voxel_size_ + 1e-6) {
+    tsdf_voxel->interestingness = tsdf_voxel->interestingness * tsdf_voxel->interesting_weight + interestingness;
+    tsdf_voxel->interesting_weight++;
+    tsdf_voxel->interestingness /= tsdf_voxel->interesting_weight;
+    // std::cout << "Hello " << interestingness << std::endl;
+    // check if this is the original interesting voxel
+    std::cout << "updateTsdfVoxel 3" << std::endl;
+    if (!tsdf_voxel->in_queue) {
+      tsdf_voxel->in_queue = true;
+      // interesting_voxel_idx.push_back(global_voxel_idx);
+    }
+    if (interestingness > 0.0) {
+      tsdf_voxel->interesting_distance = 0.0;
+    }
+  }
+  std::cout << "updateTsdfVoxel 4" << std::endl;
+}
+
 // Thread safe.
 // Figure out whether the voxel is behind or in front of the surface.
 // To do this, project the voxel_center onto the ray from origin to point G.
@@ -552,6 +634,78 @@ void FastTsdfIntegrator::integrateFunction(const Transformation& T_G_C,
   }
 }
 
+void FastTsdfIntegrator::integrateFunctionWithInterestingness(const Transformation& T_G_C,
+                                           const Pointcloud& points_C,
+                                           const Colors& colors,
+                                           const Interestingness& interestingness,
+                                           std::vector<GlobalIndex>& interesting_voxel_idx,
+                                           const bool freespace_points,
+                                           ThreadSafeIndex* index_getter) {
+  DCHECK(index_getter != nullptr);
+
+  size_t point_idx;
+  while (index_getter->getNextIndex(&point_idx) &&
+         (std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - integration_start_time_)
+              .count() < config_.max_integration_time_s * 1000000)) {
+    // std::cout << "integrateFunction 1";
+    const Point& point_C = points_C[point_idx];
+    const Color& color = colors[point_idx];
+    const float interesting_level = interestingness[point_idx];
+    bool is_clearing;
+    if (!isPointValid(point_C, freespace_points, &is_clearing)) {
+      continue;
+    }
+    // std::cout << "integrateFunction 2";
+    const Point origin = T_G_C.getPosition();
+    const Point point_G = T_G_C * point_C;
+    // Checks to see if another ray in this scan has already started 'close'
+    // to this location. If it has then we skip ray casting this point. We
+    // measure if a start location is 'close' to another points by inserting
+    // the point into a set of voxels. This voxel set has a resolution
+    // start_voxel_subsampling_factor times higher then the voxel size.
+    GlobalIndex global_voxel_idx;
+    global_voxel_idx = getGridIndexFromPoint<GlobalIndex>(
+        point_G, config_.start_voxel_subsampling_factor * voxel_size_inv_);
+    if (!start_voxel_approx_set_.replaceHash(global_voxel_idx)) {
+      continue;
+    }
+    // std::cout << "integrateFunction 3";
+    constexpr bool cast_from_origin = false;
+    RayCaster ray_caster(origin, point_G, is_clearing,
+                         config_.voxel_carving_enabled,
+                         config_.max_ray_length_m, voxel_size_inv_,
+                         config_.default_truncation_distance, cast_from_origin);
+
+    int64_t consecutive_ray_collisions = 0;
+
+    Block<TsdfVoxel>::Ptr block = nullptr;
+    BlockIndex block_idx;
+    while (ray_caster.nextRayIndex(&global_voxel_idx)) {
+      // Check if the current voxel has been seen by any ray cast this scan.
+      // If it has increment the consecutive_ray_collisions counter, otherwise
+      // reset it. If the counter reaches a threshold we stop casting as the
+      // ray is deemed to be contributing too little new information.
+      // std::cout << "integrateFunction 4";
+      if (!voxel_observed_approx_set_.replaceHash(global_voxel_idx)) {
+        ++consecutive_ray_collisions;
+      } else {
+        consecutive_ray_collisions = 0;
+      }
+      if (consecutive_ray_collisions > config_.max_consecutive_ray_collisions) {
+        break;
+      }
+
+      TsdfVoxel* voxel =
+          allocateStorageAndGetVoxelPtr(global_voxel_idx, &block, &block_idx);
+
+      const float weight = getVoxelWeight(point_C);
+      updateTsdfVoxel(origin, point_G, global_voxel_idx, color,
+                      interesting_level, interesting_voxel_idx, weight, voxel);
+    }
+  }
+}
+
 void FastTsdfIntegrator::integratePointCloud(const Transformation& T_G_C,
                                              const Pointcloud& points_C,
                                              const Colors& colors,
@@ -582,6 +736,46 @@ void FastTsdfIntegrator::integratePointCloud(const Transformation& T_G_C,
     thread.join();
   }
 
+  integrate_timer.Stop();
+
+  timing::Timer insertion_timer("inserting_missed_blocks");
+  updateLayerWithStoredBlocks();
+  insertion_timer.Stop();
+}
+
+void FastTsdfIntegrator::integratePointCloudWithInterestingness(const Transformation& T_G_C,
+                                             const Pointcloud& points_C,
+                                             const Colors& colors,
+                                             const Interestingness& interestingness,
+                                             std::vector<GlobalIndex>& interesting_voxel_idx,
+                                             const bool freespace_points) {
+  timing::Timer integrate_timer("integrate/fast");
+  CHECK_EQ(points_C.size(), colors.size());
+
+  integration_start_time_ = std::chrono::steady_clock::now();
+
+  static int64_t reset_counter = 0;
+  if ((++reset_counter) >= config_.clear_checks_every_n_frames) {
+    reset_counter = 0;
+    start_voxel_approx_set_.resetApproxSet();
+    voxel_observed_approx_set_.resetApproxSet();
+  }
+
+  std::unique_ptr<ThreadSafeIndex> index_getter(
+      ThreadSafeIndexFactory::get(config_.integration_order_mode, points_C));
+
+  std::list<std::thread> integration_threads;
+  for (size_t i = 0; i < config_.integrator_threads; ++i) {
+    integration_threads.emplace_back(&FastTsdfIntegrator::integrateFunctionWithInterestingness,
+                                     this, T_G_C, points_C, colors, 
+                                     interestingness, 
+                                     std::ref(interesting_voxel_idx), 
+                                     freespace_points, index_getter.get());
+  }
+
+  for (std::thread& thread : integration_threads) {
+    thread.join();
+  }
   integrate_timer.Stop();
 
   timing::Timer insertion_timer("inserting_missed_blocks");
