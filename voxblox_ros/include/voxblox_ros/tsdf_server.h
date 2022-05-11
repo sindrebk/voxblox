@@ -10,6 +10,8 @@
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl_ros/point_cloud.h>
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/voxel_grid.h>
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <std_srvs/Empty.h>
@@ -206,13 +208,13 @@ class TsdfServer {
                             const Pointcloud& ptcloud_C,
                             const Colors& colors,
                             const Interestingness& interestingness,
-                            std::vector<GlobalIndex>& interesting_voxel_idx,
                             const bool is_freespace_pointcloud);  
   void lightInsertPointcloud(const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in,
-    std::vector<GlobalIndex>& interesting_voxel_idx);
+    std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx);
 
   virtual void lightProcessPointCloudMessageAndInsert(
-    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::vector<GlobalIndex>& interesting_voxel_idx,
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, 
+    std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx,
     const Transformation& T_G_C, const bool is_freespace_pointcloud);
 
   bool calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
@@ -232,7 +234,7 @@ class TsdfServer {
   bool checkUnknownStatus(const voxblox::TsdfVoxel* voxel) const;
 
   voxblox::Layer<voxblox::TsdfVoxel>* sdf_layer_;
-  std::vector<GlobalIndex> interesting_voxels;
+  std::shared_ptr<std::vector<GlobalIndex>> interesting_voxels = std::make_shared<std::vector<GlobalIndex>>();
 
  protected:
   /**

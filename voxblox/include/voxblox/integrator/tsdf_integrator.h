@@ -104,7 +104,6 @@ class TsdfIntegratorBase {
   virtual void integratePointCloudWithInterestingness(const Transformation& T_G_C,
                                   const Pointcloud& points_C, const Colors& colors,
                                   const Interestingness& interestingness,
-                                  std::vector<GlobalIndex>& interesting_voxel_idx,
                                   const bool freespace_points = false) {}
 
   /// Returns a CONST ref of the config.
@@ -164,7 +163,6 @@ class TsdfIntegratorBase {
                         const Point& point_G,
                         const GlobalIndex& global_voxel_idx,
                         const Color& color, const float interestingness,
-                        std::vector<GlobalIndex>& interesting_voxel_idx,
                         const float weight,
                         TsdfVoxel* tsdf_voxel);
 
@@ -315,14 +313,12 @@ class FastTsdfIntegrator : public TsdfIntegratorBase {
   void integrateFunctionWithInterestingness(const Transformation& T_G_C,
                           const Pointcloud& points_C, const Colors& colors,
                           const Interestingness& interestingness,
-                          std::vector<GlobalIndex>& interesting_voxel_idx,
                           const bool freespace_points,
                           ThreadSafeIndex* index_getter);
 
   void integratePointCloudWithInterestingness(const Transformation& T_G_C,
                             const Pointcloud& points_C, const Colors& colors,
                             const Interestingness& interestingness,
-                            std::vector<GlobalIndex>& interesting_voxel_idx,
                             const bool freespace_points = false);
 
  private:

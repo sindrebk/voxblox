@@ -212,11 +212,9 @@ void TsdfIntegratorBase::updateTsdfVoxel(const Point& origin,
                                          const Point& point_G,
                                          const GlobalIndex& global_voxel_idx,
                                          const Color& color, const float interestingness,
-                                         std::vector<GlobalIndex>& interesting_voxel_idx,
                                          const float weight,
                                          TsdfVoxel* tsdf_voxel) {
   DCHECK(tsdf_voxel != nullptr);
-  std::cout << "updateTsdfVoxel 0" << std::endl;
   const Point voxel_center =
       getCenterPointFromGridIndex(global_voxel_idx, voxel_size_);
 
@@ -232,7 +230,6 @@ void TsdfIntegratorBase::updateTsdfVoxel(const Point& origin,
                      (config_.default_truncation_distance - dropoff_epsilon);
     updated_weight = std::max(updated_weight, 0.0f);
   }
-  std::cout << "updateTsdfVoxel 1" << std::endl;
   // Compute the updated weight in case we compensate for sparsity. By
   // multiplicating the weight of occupied areas (|sdf| < truncation distance)
   // by a factor, we prevent to easily fade out these areas with the free
@@ -271,23 +268,11 @@ void TsdfIntegratorBase::updateTsdfVoxel(const Point& origin,
   tsdf_voxel->weight = std::min(config_.max_weight, new_weight);
   
   // only assign interestingness to occupied voxel in the ray
-  std::cout << "updateTsdfVoxel 2" << std::endl;
   if (tsdf_voxel->distance < voxel_size_ + 1e-6) {
     tsdf_voxel->interestingness = tsdf_voxel->interestingness * tsdf_voxel->interesting_weight + interestingness;
     tsdf_voxel->interesting_weight++;
     tsdf_voxel->interestingness /= tsdf_voxel->interesting_weight;
-    // std::cout << "Hello " << interestingness << std::endl;
-    // check if this is the original interesting voxel
-    std::cout << "updateTsdfVoxel 3" << std::endl;
-    if (!tsdf_voxel->in_queue) {
-      tsdf_voxel->in_queue = true;
-      // interesting_voxel_idx.push_back(global_voxel_idx);
-    }
-    if (interestingness > 0.0) {
-      tsdf_voxel->interesting_distance = 0.0;
-    }
   }
-  std::cout << "updateTsdfVoxel 4" << std::endl;
 }
 
 // Thread safe.
@@ -638,7 +623,6 @@ void FastTsdfIntegrator::integrateFunctionWithInterestingness(const Transformati
                                            const Pointcloud& points_C,
                                            const Colors& colors,
                                            const Interestingness& interestingness,
-                                           std::vector<GlobalIndex>& interesting_voxel_idx,
                                            const bool freespace_points,
                                            ThreadSafeIndex* index_getter) {
   DCHECK(index_getter != nullptr);
@@ -701,7 +685,7 @@ void FastTsdfIntegrator::integrateFunctionWithInterestingness(const Transformati
 
       const float weight = getVoxelWeight(point_C);
       updateTsdfVoxel(origin, point_G, global_voxel_idx, color,
-                      interesting_level, interesting_voxel_idx, weight, voxel);
+                      interesting_level, weight, voxel);
     }
   }
 }
@@ -747,7 +731,6 @@ void FastTsdfIntegrator::integratePointCloudWithInterestingness(const Transforma
                                              const Pointcloud& points_C,
                                              const Colors& colors,
                                              const Interestingness& interestingness,
-                                             std::vector<GlobalIndex>& interesting_voxel_idx,
                                              const bool freespace_points) {
   timing::Timer integrate_timer("integrate/fast");
   CHECK_EQ(points_C.size(), colors.size());
@@ -769,7 +752,6 @@ void FastTsdfIntegrator::integratePointCloudWithInterestingness(const Transforma
     integration_threads.emplace_back(&FastTsdfIntegrator::integrateFunctionWithInterestingness,
                                      this, T_G_C, points_C, colors, 
                                      interestingness, 
-                                     std::ref(interesting_voxel_idx), 
                                      freespace_points, index_getter.get());
   }
 

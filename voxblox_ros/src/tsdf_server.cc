@@ -640,7 +640,7 @@ void TsdfServer::publishMapEvent(const ros::TimerEvent& /*event*/) {
 void TsdfServer::clear() {
   tsdf_map_->getTsdfLayerPtr()->removeAllBlocks();
   mesh_layer_->clear();
-  interesting_voxels.clear();
+  interesting_voxels->clear();
 
   // Publish a message to reset the map to all subscribers.
   if (publish_tsdf_map_) {
@@ -669,16 +669,15 @@ void TsdfServer::integratePointcloud(const Transformation& T_G_C,
                                      const Pointcloud& ptcloud_C,
                                      const Colors& colors,
                                      const Interestingness& interestingness,
-                                     std::vector<GlobalIndex>& interesting_voxel_idx,
                                      const bool is_freespace_pointcloud) {
   CHECK_EQ(ptcloud_C.size(), colors.size());
   tsdf_integrator_->integratePointCloudWithInterestingness(T_G_C, ptcloud_C, colors,
-                                        interestingness, interesting_voxel_idx,
+                                        interestingness,
                                         is_freespace_pointcloud);                                      
 }
 
 void TsdfServer::lightProcessPointCloudMessageAndInsert(
-    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::vector<GlobalIndex>& interesting_voxel_idx,
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx,
     const Transformation& T_G_C, const bool is_freespace_pointcloud) {
   Pointcloud points_C;
   Colors colors;
@@ -698,8 +697,51 @@ void TsdfServer::lightProcessPointCloudMessageAndInsert(
   }
 
   ros::WallTime start = ros::WallTime::now();
-  integratePointcloud(T_G_C_refined, points_C, colors, interestingness, interesting_voxel_idx, is_freespace_pointcloud);
+  integratePointcloud(T_G_C_refined, points_C, colors, interestingness, is_freespace_pointcloud);
   ros::WallTime end = ros::WallTime::now();
+
+  // populate interesting voxel idx
+  // filter points that have interestingness > threshold
+  // std::cout << "PointCloud before filtering: " << pointcloud_pcl.width * pointcloud_pcl.height 
+  //      << " data points (" << pcl::getFieldsList(pointcloud_pcl) << ")." << std::endl;
+  pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_out(new pcl::PointCloud<pcl::PointXYZI>);
+  pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_in(new pcl::PointCloud<pcl::PointXYZI>);
+  *pcl_in = pointcloud_pcl;
+  pcl::PassThrough<pcl::PointXYZI> pass_filter;
+  pass_filter.setInputCloud(pcl_in);
+  pass_filter.setFilterFieldName("intensity");
+  pass_filter.setFilterLimits(0.5, 1.0);
+  pass_filter.filter(*pcl_out);
+  // std::cout << "PointCloud after pass filtering: " << pcl_out->width * pcl_out->height 
+  //      << " data points (" << pcl::getFieldsList(*pcl_out) << ")." << std::endl;    
+  
+  // voxel filter
+  pcl::VoxelGrid<pcl::PointXYZI> voxel_filter;
+  voxel_filter.setInputCloud(pcl_out);
+  voxel_filter.setLeafSize(0.05f, 0.05f, 0.05f);
+  voxel_filter.filter(*pcl_out);
+  // std::cout << "PointCloud after voxel filtering: " << pcl_out->width * pcl_out->height 
+  //      << " data points (" << pcl::getFieldsList(*pcl_out) << ")." << std::endl;  
+  
+  // get their global_voxel_idx
+  const float voxel_size = sdf_layer_->voxel_size();
+  for (auto p: pcl_out->points) {
+    Point p_tmp;
+    p_tmp << p.x, p.y, p.z;
+    voxblox::GlobalIndex global_index = voxblox::getGridIndexFromPoint<voxblox::GlobalIndex>(
+              p_tmp, 1.0/voxel_size);
+    voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
+    if (voxel != nullptr) {
+      if (!voxel->in_queue) {
+        voxel->in_queue = true;
+        if (voxel->interestingness > 0.0) {
+          voxel->interesting_distance = 0.0;
+          // std::cout << "voxel->interestingness:" << voxel->interestingness;
+          interesting_voxel_idx->push_back(global_index);
+        }
+      }
+    }
+  }
 
   if (verbose_) {
     ROS_INFO("Finished integrating in %f seconds, have %lu blocks.",
@@ -709,7 +751,7 @@ void TsdfServer::lightProcessPointCloudMessageAndInsert(
 }
 
 void TsdfServer::lightInsertPointcloud(
-    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in, std::vector<GlobalIndex>& interesting_voxel_idx) {
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in, std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx) {
   Transformation T_G_C;
   T_G_C.setIdentity();
 
@@ -862,17 +904,10 @@ float TsdfServer::getScanStatus(
     ray_normalized = ray_normalized / ray_norm;  // Normalized here
     // Iterate over the ray.
     double prev_step_dist = 0.0;
-    for (double step = 0.0; step <= ray_norm; step += step_size) {
-      // if (nonuniform_ray_cast_) {
-      //   if (std::abs(prev_step_dist - step) > step_size_change_dist &&
-      //       step <= step_size_change_dist_end) {
-      //     prev_step_dist = step;
-      //     step_size += og_step_size;
-      //   }
-      // }
+    for (double step = 0.0; step <= ray_norm; step += step_size) { // FIX IT !!!!!!!!!!!!!!!!
       Eigen::Vector3d voxel_coordi = (pos + ray_normalized * step);
-      voxblox::LongIndex global_index =
-          voxblox::getGridIndexFromPoint<voxblox::LongIndex>(
+      voxblox::GlobalIndex global_index =
+          voxblox::getGridIndexFromPoint<voxblox::GlobalIndex>(
               voxel_coordi.cast<voxblox::FloatingPoint>(), voxel_size_inv);
       voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
       // Unknown
@@ -990,17 +1025,20 @@ void TsdfServer::spreadInterestingness(GlobalIndex global_index) {
     for (unsigned int idx = 0u; idx < neighbor_indices.cols(); ++idx) {
       const GlobalIndex& neighbor_index = neighbor_indices.col(idx);
       voxblox::TsdfVoxel* neighbor_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(neighbor_index);        
-      if (neighbor_voxel == nullptr) { // can miss some unknown here!
+      if (neighbor_voxel == nullptr) { // can miss some unknown voxels here!
         continue;
       }
       // update interesting level if this's unknown voxel and need to be updated
       if (checkUnknownStatus(neighbor_voxel)) {
         if (neighbor_voxel->interesting_distance > parent_voxel->interesting_distance + 1) {
           neighbor_voxel->interesting_distance = parent_voxel->interesting_distance + 1;
-          neighbor_voxel->interestingness = exp(-0.5 * parent_voxel->interesting_distance);
+          neighbor_voxel->interestingness = exp(-0.5 * parent_voxel->interesting_distance); // decay function
         }
-        if (neighbor_voxel->interesting_distance < 5.0) { // stop the spreading when the voxel is too far away from the original interesting voxel
+        // stop the spreading when the voxel is too far away from the original interesting voxels
+        if (!neighbor_voxel->in_queue &&
+            (neighbor_voxel->interesting_distance < 5.0)) {  
           voxel_queue.push(neighbor_index);
+          neighbor_voxel->in_queue = true;
         }
       }
     }
@@ -1019,10 +1057,10 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
   lightInsertPointcloud(pcl_in, interesting_voxels);
   
   // spread interestingness out
-  for (idx = 0; idx < interesting_voxels.size(); idx++) {
+  for (idx = 0; idx < interesting_voxels->size(); idx++) {
     // get the global index by coordinate
     // get the voxel, set interesting_distance = 0
-    spreadInterestingness(interesting_voxels[idx]);
+    spreadInterestingness(interesting_voxels->at(idx));
   }
 
   // calculate info gain
