@@ -235,6 +235,7 @@ class TsdfServer {
 
   voxblox::Layer<voxblox::TsdfVoxel>* sdf_layer_;
   std::shared_ptr<std::vector<GlobalIndex>> interesting_voxels = std::make_shared<std::vector<GlobalIndex>>();
+  std::shared_ptr<std::vector<GlobalIndex>> observed_interesting_unknown_voxels = std::make_shared<std::vector<GlobalIndex>>();
 
  protected:
   /**
@@ -381,6 +382,8 @@ class TsdfServer {
   // Info gain calculation
   SensorParamsBase camera_param;
   VolumetricGain vgain;
+  double decay_lambda_ = 1.0; // 0.0-1.0
+  double decay_distance_ = 5.0;
 };
 
 }  // namespace voxblox

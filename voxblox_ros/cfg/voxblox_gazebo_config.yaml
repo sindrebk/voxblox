@@ -3,13 +3,13 @@ use_tf_transforms: True
 use_freespace_pointcloud: False #True
 tsdf_voxels_per_side: 16 # Size of the block in voxblox
 tsdf_voxel_size: 0.2
-max_ray_length_m: 10.0
+max_ray_length_m: 14.0
 truncation_distance: 0.4
 voxel_carving_enabled: True
 color_mode: "height"
 verbose: False
 
-update_mesh_every_n_sec: 1.0 # markers will not be visualized in rviz, but the tsdf will still work
+update_mesh_every_n_sec: 0.0 # markers will not be visualized in rviz, but the tsdf will still work
 
 # update_map_every_n_sec: 4.0 # unknown
 mesh_min_weight: 1e-4
@@ -19,6 +19,7 @@ integration_order_mode: "sorted"
 # max_consecutive_ray_collisions: 2
 # start_voxel_subsampling_factor: 2
 publish_pointclouds: True
+publish_pointclouds_on_update: True
 allow_clear: True
 pointcloud_queue_size: 5
 min_time_between_msgs_sec: 0.0
@@ -36,3 +37,7 @@ publish_tsdf_map: False
 # OVERLAP BETWEEN VERSIONS #
 use_const_weight: True # check
 use_weight_dropoff: True
+
+# for decaying interestingness to unknown neighbor voxels
+decay_lambda: 0.9 # 0.0 - 1.0
+decay_distance: 5.0

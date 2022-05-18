@@ -120,6 +120,12 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
   camera_param.resolution << 5.0 * M_PI / 180.0, 5.0 * M_PI / 180.0;
   camera_param.initialize();
 
+  // param for decay function
+  nh_private.param("decay_lambda", decay_lambda_, decay_lambda_);
+  std::cout << "decay_lambda:" << decay_lambda_ << std::endl;
+  nh_private.param("decay_distance", decay_distance_, decay_distance_);
+  std::cout << "decay_distance:" << decay_distance_ << std::endl;
+
   sdf_layer_ = getTsdfMapPtr()->getTsdfLayerPtr();
 
   // Advertise services.
@@ -751,17 +757,14 @@ void TsdfServer::lightProcessPointCloudMessageAndInsert(
 }
 
 void TsdfServer::lightInsertPointcloud(
-    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in, std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx) {
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in,
+    std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx) {
   Transformation T_G_C;
   T_G_C.setIdentity();
 
   constexpr bool is_freespace_pointcloud = false;
   lightProcessPointCloudMessageAndInsert(pointcloud_msg_in, interesting_voxel_idx, T_G_C,
                                     is_freespace_pointcloud);
-
-  if (publish_pointclouds_on_update_) {
-    publishPointclouds();
-  }
 
   if (verbose_) {
     ROS_INFO_STREAM("Timings: " << std::endl << timing::Timing::Print());
@@ -874,7 +877,7 @@ float TsdfServer::getScanStatus(
       pos.cast<voxblox::FloatingPoint>() * voxel_size_inv;
   // const float distance_thres =
       // occupancy_distance_voxelsize_factor_ * sdf_layer_->voxel_size() + 1e-6;
-  const float distance_thres = sdf_layer_->voxel_size() + 1e-6;
+  const float distance_thres = voxel_size + 1e-6;
 
   // NOTES: no optimization / no twice-counting considerations possible without
   // refactoring planning strategy here
@@ -894,55 +897,103 @@ float TsdfServer::getScanStatus(
   // voxel_log.reserve(multiray_endpoints.size() *
   // tsdf_integrator_config_.max_ray_length_m * voxel_size_inv); //optimize for
   // number of rays
+  Point origin;
+  origin << 0.0, 0.0, 0.0;
+  TsdfIntegratorBase::Config integrator_config = tsdf_integrator_->getConfig();
+  voxblox::GlobalIndex global_index;
   for (size_t i = 0; i < multiray_endpoints.size(); ++i) {
-    float step_size = voxel_size;//* ray_cast_step_size_multiplier_;
-    float step_size_inv = 1.0 / step_size;
-    float og_step_size = step_size;
-    Eigen::Vector3d ray_normalized =
-        (multiray_endpoints[i] - pos);  // Not yet noramlized
-    double ray_norm = ray_normalized.norm();
-    ray_normalized = ray_normalized / ray_norm;  // Normalized here
-    // Iterate over the ray.
-    double prev_step_dist = 0.0;
-    for (double step = 0.0; step <= ray_norm; step += step_size) { // FIX IT !!!!!!!!!!!!!!!!
-      Eigen::Vector3d voxel_coordi = (pos + ray_normalized * step);
-      voxblox::GlobalIndex global_index =
-          voxblox::getGridIndexFromPoint<voxblox::GlobalIndex>(
-              voxel_coordi.cast<voxblox::FloatingPoint>(), voxel_size_inv);
+    // float step_size = voxel_size;//* ray_cast_step_size_multiplier_;
+    // float step_size_inv = 1.0 / step_size;
+    // float og_step_size = step_size;
+    // Eigen::Vector3d ray_normalized =
+    //     (multiray_endpoints[i] - pos);  // Not yet noramlized
+    // double ray_norm = ray_normalized.norm();
+    // ray_normalized = ray_normalized / ray_norm;  // Normalized here
+    // // Iterate over the ray.
+    // double prev_step_dist = 0.0;
+    // for (double step = 0.0; step <= ray_norm; step += step_size) { // FIX IT !!!!!!!!!!!!!!!!
+    //   Eigen::Vector3d voxel_coordi = (pos + ray_normalized * step);
+    //   voxblox::GlobalIndex global_index =
+    //       voxblox::getGridIndexFromPoint<voxblox::GlobalIndex>(
+    //           voxel_coordi.cast<voxblox::FloatingPoint>(), voxel_size_inv);
+    //   voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
+    //   // Unknown
+    //   if (checkUnknownStatus(voxel)) {
+    //     /*raycast_unknown_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
+    //     ++num_unknown_voxels;
+    //     if (voxel != nullptr) {
+    //       interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF UNKNOWN VOXEL
+    //     }
+    //     voxel_log.push_back(std::make_pair(
+    //         voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+    //             .cast<double>(),
+    //         VoxelStatus::kUnknown));
+    //     continue;
+    //   }
+    //   // Free
+    //   if (voxel->distance > distance_thres) {
+    //     /*raycast_free_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
+    //     ++num_free_voxels;
+    //     voxel_log.push_back(std::make_pair(
+    //         voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+    //             .cast<double>(),
+    //         VoxelStatus::kFree));
+    //     continue;
+    //   }
+    //   // Occupied
+    //   /*raycast_occupied_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
+    //   ++num_occupied_voxels;
+    //   // interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF OCCUPIED VOXEL
+    //   voxel_log.push_back(std::make_pair(
+    //       voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+    //           .cast<double>(),
+    //       VoxelStatus::kOccupied));
+    //   break;
+    // }
+  
+    RayCaster ray_caster(origin, multiray_endpoints[i].cast<voxblox::FloatingPoint>(), false,
+                         integrator_config.voxel_carving_enabled,
+                         integrator_config.max_ray_length_m, voxel_size_inv,
+                         integrator_config.default_truncation_distance, true);
+    while (ray_caster.nextRayIndex(&global_index)) {
       voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
       // Unknown
       if (checkUnknownStatus(voxel)) {
         /*raycast_unknown_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
         ++num_unknown_voxels;
         if (voxel != nullptr) {
-          interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF UNKNOWN VOXEL
+          if (!voxel->is_interestingness_counted) {
+            interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF UNKNOWN VOXEL
+            voxel->is_interestingness_counted = true;
+            observed_interesting_unknown_voxels->push_back(global_index);
+          }
         }
-        voxel_log.push_back(std::make_pair(
-            voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-                .cast<double>(),
-            VoxelStatus::kUnknown));
+        // voxel_log.push_back(std::make_pair(
+        //     voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+        //         .cast<double>(),
+        //     VoxelStatus::kUnknown));
         continue;
       }
       // Free
       if (voxel->distance > distance_thres) {
         /*raycast_free_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
         ++num_free_voxels;
-        voxel_log.push_back(std::make_pair(
-            voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-                .cast<double>(),
-            VoxelStatus::kFree));
+        // voxel_log.push_back(std::make_pair(
+        //     voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+        //         .cast<double>(),
+        //     VoxelStatus::kFree));
         continue;
       }
       // Occupied
       /*raycast_occupied_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
       ++num_occupied_voxels;
       // interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF OCCUPIED VOXEL
-      voxel_log.push_back(std::make_pair(
-          voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-              .cast<double>(),
-          VoxelStatus::kOccupied));
+      // voxel_log.push_back(std::make_pair(
+      //     voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
+      //         .cast<double>(),
+      //     VoxelStatus::kOccupied));
       break;
-    }
+    }        
   }
   /*std::sort(raycast_unknown_vec_.begin(), raycast_unknown_vec_.end());
   std::sort(raycast_occupied_vec_.begin(), raycast_occupied_vec_.end());
@@ -1032,11 +1083,11 @@ void TsdfServer::spreadInterestingness(GlobalIndex global_index) {
       if (checkUnknownStatus(neighbor_voxel)) {
         if (neighbor_voxel->interesting_distance > parent_voxel->interesting_distance + 1) {
           neighbor_voxel->interesting_distance = parent_voxel->interesting_distance + 1;
-          neighbor_voxel->interestingness = exp(-0.5 * parent_voxel->interesting_distance); // decay function
+          neighbor_voxel->interestingness = decay_lambda_ * parent_voxel->interestingness; // decay function
         }
         // stop the spreading when the voxel is too far away from the original interesting voxels
         if (!neighbor_voxel->in_queue &&
-            (neighbor_voxel->interesting_distance < 5.0)) {  
+            (neighbor_voxel->interesting_distance < decay_distance_)) {  
           voxel_queue.push(neighbor_index);
           neighbor_voxel->in_queue = true;
         }
@@ -1063,6 +1114,10 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
     spreadInterestingness(interesting_voxels->at(idx));
   }
 
+  if (publish_pointclouds_on_update_) {
+    publishPointclouds();
+  }
+
   // calculate info gain
   // auto end1 = std::chrono::steady_clock::now();
   for (idx = 0; idx < 6 * num_cam_poses; idx = idx + 6) {
@@ -1072,6 +1127,13 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
                  request.camera_poses[idx + 4], request.camera_poses[idx + 5];
     computeVolumetricGainRayModelNoBound(state_vec, vgain);
     response.info_gain.push_back(vgain.gain);
+    // reset observed_interesting_unknown_voxels for next frame
+    for (int32_t idx2 = 0; idx2 < observed_interesting_unknown_voxels->size(); idx2++) {
+      voxblox::GlobalIndex global_index = observed_interesting_unknown_voxels->at(idx2);
+      voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
+      voxel->is_interestingness_counted = false;
+    }
+    observed_interesting_unknown_voxels->clear();
   }
   
   // clear the map
