@@ -16,7 +16,9 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <std_srvs/Empty.h>
 #include <tf/transform_broadcaster.h>
+#include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
+#include <geometry_msgs/Point.h>
 
 #include <voxblox/alignment/icp.h>
 #include <voxblox/core/tsdf_map.h>
@@ -33,9 +35,24 @@
 #include "voxblox_ros/ptcloud_vis.h"
 #include "voxblox_ros/transformer.h"
 
+#define TUNE_PARAM_
+
 namespace voxblox {
 
 constexpr float kDefaultMaxIntensity = 100.0;
+
+#ifdef TUNE_PARAM_
+constexpr int kNumYaw = 32;
+constexpr int kNumVelZ = 8;
+constexpr int kNumVelX = 1;
+constexpr int kNumTimestep = 15;
+constexpr double kHorizontalFov = 90.0;
+constexpr double kHorizontalFov_div2 = 0.5 * kHorizontalFov;
+constexpr double kVerticalFov = 65.0;
+constexpr double kVerticalFov_div2 = 0.5 * kVerticalFov;
+constexpr double alpha_v = 0.950010681010268;
+constexpr double alpha_psi = 0.953133787077505;
+#endif
 
 typedef Eigen::Matrix<double, 6, 1> StateVec;
 
@@ -380,10 +397,17 @@ class TsdfServer {
   Transformation icp_corrected_transform_;
 
   // Info gain calculation
+  ros::Publisher gain_vis_pub_;
   SensorParamsBase camera_param;
   VolumetricGain vgain;
   double decay_lambda_ = 1.0; // 0.0-1.0
   double decay_distance_ = 5.0;
+
+#ifdef TUNE_PARAM_
+  // action sequence lib
+  Eigen::Matrix<double, voxblox::kNumYaw * voxblox::kNumVelX, 6 * voxblox::kNumTimestep> robot_states_;
+  Eigen::Matrix<double, voxblox::kNumYaw * voxblox::kNumVelX, 3> action_sequences_;
+#endif  
 };
 
 }  // namespace voxblox

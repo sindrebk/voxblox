@@ -62,6 +62,8 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
 
   mesh_pub_ = nh_private_.advertise<voxblox_msgs::Mesh>("mesh", 1, true);
 
+  gain_vis_pub_ = nh_private_.advertise<visualization_msgs::MarkerArray>("info_gain", 1, true);
+
   // Publishing/subscribing to a layer from another node (when using this as
   // a library, for example within a planner).
   tsdf_map_pub_ =
@@ -119,6 +121,37 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
   camera_param.fov << 90.0 * M_PI / 180.0, 65.0 * M_PI / 180.0;
   camera_param.resolution << 5.0 * M_PI / 180.0, 5.0 * M_PI / 180.0;
   camera_param.initialize();
+
+#ifdef TUNE_PARAM_
+  // populate action sequence array
+  for (int i = 0; i < kNumYaw * kNumVelX; i++) {
+    action_sequences_(i, 0) = 1.0; // x-vel
+    action_sequences_(i, 1) = 0.0; // z-vel
+    action_sequences_(i, 2) =
+        -kHorizontalFov_div2 +
+        i * kHorizontalFov / (kNumYaw * kNumVelX - 1);  // steering angle
+
+    double psi_tmp = 0.0;
+    double forward_vel_tmp = 0.0;
+    Eigen::Matrix<double, 3, 1> pos_tmp{0.0, 0.0, 0.0};
+    
+    for (int j = 0; j < kNumTimestep; j++) {
+      // forward dynamics
+      for (int k = 0; k < 10; k++) {
+        forward_vel_tmp = alpha_v * forward_vel_tmp + (1 - alpha_v) * action_sequences_(i, 0);
+        psi_tmp = alpha_psi * psi_tmp + (1 - alpha_psi) * action_sequences_(i, 2);
+        Eigen::Matrix<double, 3, 1> v_t;
+        v_t << forward_vel_tmp * cos(psi_tmp), forward_vel_tmp * sin(psi_tmp), 0.0;
+        pos_tmp = pos_tmp + v_t * 4/150;
+      }
+
+      robot_states_.block<1, 3>(i, 6*j) = pos_tmp; // x-y-z position
+      // std::cout << "pos_tmp:" << pos_tmp << ", robot_states_:" << robot_states_.block<1, 3>(i, 6*j) << std::endl;
+      robot_states_(i, 6*j + 5) = psi_tmp; // yaw angle
+    }
+  }
+
+#endif
 
   // param for decay function
   nh_private.param("decay_lambda", decay_lambda_, decay_lambda_);
@@ -1099,8 +1132,8 @@ void TsdfServer::spreadInterestingness(GlobalIndex global_index) {
 bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
                                       voxblox_msgs::InfoGain::Response& response) {  // NOLINT
   StateVec state_vec;
-  int32_t num_cam_poses = request.camera_poses.size() / 6;
-  int32_t idx = 0;
+  int num_cam_poses = request.camera_poses.size() / 6;
+  int idx, idx2 = 0;
   response.info_gain.reserve(num_cam_poses);
   // integrate the pcl
   // auto start = std::chrono::steady_clock::now();
@@ -1128,7 +1161,7 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
     computeVolumetricGainRayModelNoBound(state_vec, vgain);
     response.info_gain.push_back(vgain.gain);
     // reset observed_interesting_unknown_voxels for next frame
-    for (int32_t idx2 = 0; idx2 < observed_interesting_unknown_voxels->size(); idx2++) {
+    for (idx2 = 0; idx2 < observed_interesting_unknown_voxels->size(); idx2++) {
       voxblox::GlobalIndex global_index = observed_interesting_unknown_voxels->at(idx2);
       voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
       voxel->is_interestingness_counted = false;
@@ -1136,6 +1169,77 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
     observed_interesting_unknown_voxels->clear();
   }
   
+#ifdef TUNE_PARAM_  
+  // evalute all the sequences
+  std::array<double, kNumYaw * kNumVelX> seq_gains;
+  for (idx = 0; idx < kNumYaw * kNumVelX; idx++) {
+    seq_gains[idx] = 0.0;
+    for (idx2 = 0; idx2 < 6 * kNumTimestep; idx2 = idx2 + 6) {
+      state_vec << robot_states_(idx, idx2), robot_states_(idx, idx2 + 1),
+          robot_states_(idx, idx2 + 2), 0.0, 0.0, robot_states_(idx, idx2 + 5);
+
+      computeVolumetricGainRayModelNoBound(state_vec, vgain);
+      seq_gains[idx] += vgain.gain;
+
+      // reset observed_interesting_unknown_voxels for next frame
+      for (int idx3 = 0; idx3 < observed_interesting_unknown_voxels->size(); idx3++) {
+        voxblox::GlobalIndex global_index = observed_interesting_unknown_voxels->at(idx3);
+        voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
+        voxel->is_interestingness_counted = false;
+      }
+      observed_interesting_unknown_voxels->clear();            
+    }
+  }
+  // pick the best one
+  // visualization
+  visualization_msgs::MarkerArray::Ptr gain_vis_msg = boost::make_shared<visualization_msgs::MarkerArray>();
+  int marker_id = 0;
+  int best_idx = 0;
+  // int best_idx = std::min_element(seq_gains.begin(), seq_gains.end()) - seq_gains.begin();
+  for (idx = 0; idx < kNumYaw * kNumVelX; idx++) {
+    for (idx2 = 0; idx2 < kNumTimestep; idx2++) {
+      visualization_msgs::Marker marker;
+      
+      marker.id = marker_id++;
+      marker.header.frame_id = world_frame_;
+      marker.type = visualization_msgs::Marker::LINE_STRIP;
+      marker.action = visualization_msgs::Marker::ADD;
+      marker.scale.x = 0.01;
+      if (idx == best_idx) {
+        marker.color.a = 1.0;
+        marker.color.r = 0.0;
+        marker.color.g = 0.0;
+        marker.color.b = 1.0;
+      } else {
+        marker.color.a = 0.5;
+        marker.color.r = 1.0;
+        marker.color.g = 1.0;
+        marker.color.b = 0.0;
+      }
+      
+      geometry_msgs::Point start_point, end_point;
+      
+      if (idx2 == 0) {
+        start_point.x = 0.0;
+        start_point.y = 0.0;
+        start_point.z = 0.0;
+      } else {
+        start_point.x = robot_states_(idx, 6*idx2 - 6);
+        start_point.y = robot_states_(idx, 6*idx2 - 5);
+        start_point.z = robot_states_(idx, 6*idx2 - 4);
+      }
+
+      end_point.x = robot_states_(idx, 6*idx2);
+      end_point.y = robot_states_(idx, 6*idx2 + 1);
+      end_point.z = robot_states_(idx, 6*idx2 + 2);
+      marker.points.push_back(start_point);
+      marker.points.push_back(end_point);
+      gain_vis_msg->markers.push_back(marker);      
+    }    
+  }
+  gain_vis_pub_.publish(gain_vis_msg);
+#endif
+
   // clear the map
   // auto end2 = std::chrono::steady_clock::now();
   clear();
