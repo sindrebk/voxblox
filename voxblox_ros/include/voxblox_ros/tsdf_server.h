@@ -42,16 +42,22 @@ namespace voxblox {
 constexpr float kDefaultMaxIntensity = 100.0;
 
 #ifdef TUNE_PARAM_
-constexpr int kNumYaw = 32;
+constexpr int kNumYaw = 16; //32;
 constexpr int kNumVelZ = 8;
 constexpr int kNumVelX = 1;
 constexpr int kNumTimestep = 15;
-constexpr double kHorizontalFov = 90.0;
+constexpr double kHorizontalFov = 87.0 * M_PI/180.0;
 constexpr double kHorizontalFov_div2 = 0.5 * kHorizontalFov;
-constexpr double kVerticalFov = 65.0;
+constexpr double kVerticalFov = 58.0 * M_PI/180.0;
 constexpr double kVerticalFov_div2 = 0.5 * kVerticalFov;
+constexpr double kMaxDetectionRange = 5.0;
+constexpr double kMinDetectionRange = 0.1; // IGNORED
+constexpr double kRaycastingHorizontalRes = 5.0 * M_PI/180.0;
+constexpr double kRaycastingVerticalRes = 5.0 * M_PI/180.0;
 constexpr double alpha_v = 0.950010681010268;
 constexpr double alpha_psi = 0.953133787077505;
+constexpr double F_X = 239.35153198242188;
+constexpr double F_Y = 239.05279541015625;
 #endif
 
 typedef Eigen::Matrix<double, 6, 1> StateVec;
@@ -252,7 +258,7 @@ class TsdfServer {
 
   voxblox::Layer<voxblox::TsdfVoxel>* sdf_layer_;
   std::shared_ptr<std::vector<GlobalIndex>> interesting_voxels = std::make_shared<std::vector<GlobalIndex>>();
-  std::shared_ptr<std::vector<GlobalIndex>> observed_interesting_unknown_voxels = std::make_shared<std::vector<GlobalIndex>>();
+  std::shared_ptr<std::vector<GlobalIndex>> observed_voxels = std::make_shared<std::vector<GlobalIndex>>();
 
  protected:
   /**
@@ -402,6 +408,7 @@ class TsdfServer {
   VolumetricGain vgain;
   double decay_lambda_ = 1.0; // 0.0-1.0
   double decay_distance_ = 5.0;
+  double area_factor_ = 1e5;
 
 #ifdef TUNE_PARAM_
   // action sequence lib

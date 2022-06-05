@@ -12,7 +12,7 @@ verbose: False
 update_mesh_every_n_sec: 0.0 # markers will not be visualized in rviz, but the tsdf will still work
 
 # update_map_every_n_sec: 4.0 # unknown
-mesh_min_weight: 1e-4
+mesh_min_weight: 0.0001
 slice_level: 1.0
 method: "fast"
 integration_order_mode: "sorted"
@@ -40,4 +40,5 @@ use_weight_dropoff: True
 
 # for decaying interestingness to unknown neighbor voxels
 decay_lambda: 0.9 # 0.0 - 1.0
-decay_distance: 5.0
+decay_distance: 0.0 # 0.0: disable
+area_factor: 50000 # exp(-area_factor * z^2 / (fx * fy))

@@ -116,23 +116,23 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
   icp_.reset(new ICP(getICPConfigFromRosParam(nh_private)));
 
   // compute frustum end points
-  camera_param.max_range = 5.0;
-  camera_param.min_range = 0.1;
-  camera_param.fov << 90.0 * M_PI / 180.0, 65.0 * M_PI / 180.0;
-  camera_param.resolution << 5.0 * M_PI / 180.0, 5.0 * M_PI / 180.0;
+  camera_param.max_range = kMaxDetectionRange;
+  camera_param.min_range = kMinDetectionRange;
+  camera_param.fov << kHorizontalFov, kVerticalFov;
+  camera_param.resolution << kRaycastingHorizontalRes, kRaycastingVerticalRes;
   camera_param.initialize();
 
 #ifdef TUNE_PARAM_
   // populate action sequence array
   for (int i = 0; i < kNumYaw * kNumVelX; i++) {
-    action_sequences_(i, 0) = 1.0; // x-vel
+    action_sequences_(i, 0) = 1.5; // x-vel
     action_sequences_(i, 1) = 0.0; // z-vel
     action_sequences_(i, 2) =
         -kHorizontalFov_div2 +
         i * kHorizontalFov / (kNumYaw * kNumVelX - 1);  // steering angle
 
     double psi_tmp = 0.0;
-    double forward_vel_tmp = 0.0;
+    double forward_vel_tmp = 1.5;
     Eigen::Matrix<double, 3, 1> pos_tmp{0.0, 0.0, 0.0};
     
     for (int j = 0; j < kNumTimestep; j++) {
@@ -142,7 +142,7 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
         psi_tmp = alpha_psi * psi_tmp + (1 - alpha_psi) * action_sequences_(i, 2);
         Eigen::Matrix<double, 3, 1> v_t;
         v_t << forward_vel_tmp * cos(psi_tmp), forward_vel_tmp * sin(psi_tmp), 0.0;
-        pos_tmp = pos_tmp + v_t * 4/150;
+        pos_tmp = pos_tmp + v_t * 4/150; // add one marker after 4/150 * 10 = 4/15 sec
       }
 
       robot_states_.block<1, 3>(i, 6*j) = pos_tmp; // x-y-z position
@@ -158,6 +158,10 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
   std::cout << "decay_lambda:" << decay_lambda_ << std::endl;
   nh_private.param("decay_distance", decay_distance_, decay_distance_);
   std::cout << "decay_distance:" << decay_distance_ << std::endl;
+
+  nh_private.param("area_factor", area_factor_, area_factor_);
+  std::cout << "area_factor:" << area_factor_ << std::endl;
+  area_factor_ = area_factor_ / (F_X * F_Y);
 
   sdf_layer_ = getTsdfMapPtr()->getTsdfLayerPtr();
 
@@ -935,98 +939,48 @@ float TsdfServer::getScanStatus(
   TsdfIntegratorBase::Config integrator_config = tsdf_integrator_->getConfig();
   voxblox::GlobalIndex global_index;
   for (size_t i = 0; i < multiray_endpoints.size(); ++i) {
-    // float step_size = voxel_size;//* ray_cast_step_size_multiplier_;
-    // float step_size_inv = 1.0 / step_size;
-    // float og_step_size = step_size;
-    // Eigen::Vector3d ray_normalized =
-    //     (multiray_endpoints[i] - pos);  // Not yet noramlized
-    // double ray_norm = ray_normalized.norm();
-    // ray_normalized = ray_normalized / ray_norm;  // Normalized here
-    // // Iterate over the ray.
-    // double prev_step_dist = 0.0;
-    // for (double step = 0.0; step <= ray_norm; step += step_size) { // FIX IT !!!!!!!!!!!!!!!!
-    //   Eigen::Vector3d voxel_coordi = (pos + ray_normalized * step);
-    //   voxblox::GlobalIndex global_index =
-    //       voxblox::getGridIndexFromPoint<voxblox::GlobalIndex>(
-    //           voxel_coordi.cast<voxblox::FloatingPoint>(), voxel_size_inv);
-    //   voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
-    //   // Unknown
-    //   if (checkUnknownStatus(voxel)) {
-    //     /*raycast_unknown_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
-    //     ++num_unknown_voxels;
-    //     if (voxel != nullptr) {
-    //       interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF UNKNOWN VOXEL
-    //     }
-    //     voxel_log.push_back(std::make_pair(
-    //         voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-    //             .cast<double>(),
-    //         VoxelStatus::kUnknown));
-    //     continue;
-    //   }
-    //   // Free
-    //   if (voxel->distance > distance_thres) {
-    //     /*raycast_free_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
-    //     ++num_free_voxels;
-    //     voxel_log.push_back(std::make_pair(
-    //         voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-    //             .cast<double>(),
-    //         VoxelStatus::kFree));
-    //     continue;
-    //   }
-    //   // Occupied
-    //   /*raycast_occupied_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
-    //   ++num_occupied_voxels;
-    //   // interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF OCCUPIED VOXEL
-    //   voxel_log.push_back(std::make_pair(
-    //       voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-    //           .cast<double>(),
-    //       VoxelStatus::kOccupied));
-    //   break;
-    // }
   
     RayCaster ray_caster(origin, multiray_endpoints[i].cast<voxblox::FloatingPoint>(), false,
                          integrator_config.voxel_carving_enabled,
                          integrator_config.max_ray_length_m, voxel_size_inv,
                          integrator_config.default_truncation_distance, true);
+
     while (ray_caster.nextRayIndex(&global_index)) {
       voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
       // Unknown
       if (checkUnknownStatus(voxel)) {
-        /*raycast_unknown_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
-        ++num_unknown_voxels;
         if (voxel != nullptr) {
-          if (!voxel->is_interestingness_counted) {
-            interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF UNKNOWN VOXEL
-            voxel->is_interestingness_counted = true;
-            observed_interesting_unknown_voxels->push_back(global_index);
+          if (!voxel->is_observed) {
+            voxel->is_observed = true;
+            observed_voxels->push_back(global_index);
+            ++num_unknown_voxels;
+            Point voxel_center = getCenterPointFromGridIndex(global_index, voxel_size);
+            double z2 = voxel_center(0) * voxel_center(0) + voxel_center(1) * voxel_center(1) + voxel_center(2) * voxel_center(2);
+            interestingness += voxel->interestingness * exp(-area_factor_ * z2); // COUNT INTERESTINGNESS OF UNKNOWN VOXEL
           }
         }
-        // voxel_log.push_back(std::make_pair(
-        //     voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-        //         .cast<double>(),
-        //     VoxelStatus::kUnknown));
-        continue;
       }
       // Free
-      if (voxel->distance > distance_thres) {
-        /*raycast_free_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
-        ++num_free_voxels;
-        // voxel_log.push_back(std::make_pair(
-        //     voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-        //         .cast<double>(),
-        //     VoxelStatus::kFree));
-        continue;
+      else if (voxel->distance > distance_thres) {
+        if (!voxel->is_observed) {
+          voxel->is_observed = true;
+          observed_voxels->push_back(global_index);
+          ++num_free_voxels;
+        }
       }
       // Occupied
-      /*raycast_occupied_vec_.push_back(std::hash<voxblox::GlobalIndex>()(global_index));*/
-      ++num_occupied_voxels;
-      // interestingness += voxel->interestingness; // COUNT INTERESTINGNESS OF OCCUPIED VOXEL
-      // voxel_log.push_back(std::make_pair(
-      //     voxblox::getCenterPointFromGridIndex(global_index, voxel_size)
-      //         .cast<double>(),
-      //     VoxelStatus::kOccupied));
-      break;
-    }        
+      else {
+        if (!voxel->is_observed) {
+          voxel->is_observed = true;
+          observed_voxels->push_back(global_index);
+          ++num_occupied_voxels;
+          Point voxel_center = getCenterPointFromGridIndex(global_index, voxel_size);
+          double z2 = voxel_center(0) * voxel_center(0) + voxel_center(1) * voxel_center(1) + voxel_center(2) * voxel_center(2);          
+          interestingness += voxel->interestingness * exp(-area_factor_ * z2); // COUNT INTERESTINGNESS OF OCCUPIED VOXEL
+        }
+        break; // STOP ray casting when we hit an occupied voxel
+      }
+    }
   }
   /*std::sort(raycast_unknown_vec_.begin(), raycast_unknown_vec_.end());
   std::sort(raycast_occupied_vec_.begin(), raycast_occupied_vec_.end());
@@ -1039,6 +993,8 @@ float TsdfServer::getScanStatus(
   raycast_free_vec_.end()) - raycast_free_vec_.begin();*/
   gain_log =
       std::make_tuple(num_unknown_voxels, num_free_voxels, num_occupied_voxels);
+  // std::cout << "gain_log:" << num_unknown_voxels << "," << num_free_voxels << "," << num_occupied_voxels << std::endl;
+  // std::cout << "interestingness:" << interestingness << std::endl;
   return interestingness;
 }
 
@@ -1094,35 +1050,36 @@ void TsdfServer::spreadInterestingness(GlobalIndex global_index) {
   voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
   CHECK_NOTNULL(voxel);
 
-  AlignedQueue<GlobalIndex> voxel_queue;
-  voxel_queue.push(global_index);
-  
-  while (!voxel_queue.empty()) {
-    // Get the global indices of neighbors.
-    const GlobalIndex global_index_tmp = voxel_queue.front();
-    voxel_queue.pop();
-    voxblox::TsdfVoxel* parent_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index_tmp);
-    Neighborhood<>::IndexMatrix neighbor_indices;
-    Neighborhood<>::getFromGlobalIndex(global_index_tmp, &neighbor_indices);
+  if (decay_distance_ > 0.0) {
+    AlignedQueue<GlobalIndex> voxel_queue;
+    voxel_queue.push(global_index);
+    while (!voxel_queue.empty()) {
+      // Get the global indices of neighbors.
+      const GlobalIndex global_index_tmp = voxel_queue.front();
+      voxel_queue.pop();
+      voxblox::TsdfVoxel* parent_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index_tmp);
+      Neighborhood<>::IndexMatrix neighbor_indices;
+      Neighborhood<>::getFromGlobalIndex(global_index_tmp, &neighbor_indices);
 
-    // Go through the neighbors and see if we can update any of them.
-    for (unsigned int idx = 0u; idx < neighbor_indices.cols(); ++idx) {
-      const GlobalIndex& neighbor_index = neighbor_indices.col(idx);
-      voxblox::TsdfVoxel* neighbor_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(neighbor_index);        
-      if (neighbor_voxel == nullptr) { // can miss some unknown voxels here!
-        continue;
-      }
-      // update interesting level if this's unknown voxel and need to be updated
-      if (checkUnknownStatus(neighbor_voxel)) {
-        if (neighbor_voxel->interesting_distance > parent_voxel->interesting_distance + 1) {
-          neighbor_voxel->interesting_distance = parent_voxel->interesting_distance + 1;
-          neighbor_voxel->interestingness = decay_lambda_ * parent_voxel->interestingness; // decay function
+      // Go through the neighbors and see if we can update any of them.
+      for (unsigned int idx = 0u; idx < neighbor_indices.cols(); ++idx) {
+        const GlobalIndex& neighbor_index = neighbor_indices.col(idx);
+        voxblox::TsdfVoxel* neighbor_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(neighbor_index);        
+        if (neighbor_voxel == nullptr) { // can miss some unknown voxels here!
+          continue;
         }
-        // stop the spreading when the voxel is too far away from the original interesting voxels
-        if (!neighbor_voxel->in_queue &&
-            (neighbor_voxel->interesting_distance < decay_distance_)) {  
-          voxel_queue.push(neighbor_index);
-          neighbor_voxel->in_queue = true;
+        // update interesting level if this's unknown voxel and need to be updated
+        if (checkUnknownStatus(neighbor_voxel)) {
+          if (neighbor_voxel->interesting_distance > parent_voxel->interesting_distance + 1) {
+            neighbor_voxel->interesting_distance = parent_voxel->interesting_distance + 1; // Manhattan distance
+            neighbor_voxel->interestingness = decay_lambda_ * parent_voxel->interestingness; // decay function
+          }
+          // stop the spreading when the voxel is too far away from the original interesting voxels
+          if (!neighbor_voxel->in_queue &&
+              (neighbor_voxel->interesting_distance < decay_distance_)) {  
+            voxel_queue.push(neighbor_index);
+            neighbor_voxel->in_queue = true;
+          }
         }
       }
     }
@@ -1160,13 +1117,13 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
                  request.camera_poses[idx + 4], request.camera_poses[idx + 5];
     computeVolumetricGainRayModelNoBound(state_vec, vgain);
     response.info_gain.push_back(vgain.gain);
-    // reset observed_interesting_unknown_voxels for next frame
-    for (idx2 = 0; idx2 < observed_interesting_unknown_voxels->size(); idx2++) {
-      voxblox::GlobalIndex global_index = observed_interesting_unknown_voxels->at(idx2);
+    // reset observed_voxels for next frame
+    for (idx2 = 0; idx2 < observed_voxels->size(); idx2++) {
+      voxblox::GlobalIndex global_index = observed_voxels->at(idx2);
       voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
-      voxel->is_interestingness_counted = false;
+      voxel->is_observed = false;
     }
-    observed_interesting_unknown_voxels->clear();
+    observed_voxels->clear();
   }
   
 #ifdef TUNE_PARAM_  
@@ -1181,21 +1138,27 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
       computeVolumetricGainRayModelNoBound(state_vec, vgain);
       seq_gains[idx] += vgain.gain;
 
-      // reset observed_interesting_unknown_voxels for next frame
-      for (int idx3 = 0; idx3 < observed_interesting_unknown_voxels->size(); idx3++) {
-        voxblox::GlobalIndex global_index = observed_interesting_unknown_voxels->at(idx3);
+      // reset observed_voxels for next frame
+      for (int idx3 = 0; idx3 < observed_voxels->size(); idx3++) {
+        voxblox::GlobalIndex global_index = observed_voxels->at(idx3);
         voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
-        voxel->is_interestingness_counted = false;
+        voxel->is_observed = false;
       }
-      observed_interesting_unknown_voxels->clear();            
+      observed_voxels->clear();            
     }
   }
   // pick the best one
   // visualization
   visualization_msgs::MarkerArray::Ptr gain_vis_msg = boost::make_shared<visualization_msgs::MarkerArray>();
   int marker_id = 0;
-  int best_idx = 0;
-  // int best_idx = std::min_element(seq_gains.begin(), seq_gains.end()) - seq_gains.begin();
+  // int best_idx = 0;
+  int best_idx = std::max_element(seq_gains.begin(), seq_gains.end()) - seq_gains.begin();
+  
+  std::cout << "seq_gains:" << std::endl;
+  for (idx = 0; idx < kNumYaw; idx++) {
+    std::cout << "idx:" << idx << "," << seq_gains[idx] << std::endl;
+  }
+  
   for (idx = 0; idx < kNumYaw * kNumVelX; idx++) {
     for (idx2 = 0; idx2 < kNumTimestep; idx2++) {
       visualization_msgs::Marker marker;
@@ -1204,12 +1167,12 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
       marker.header.frame_id = world_frame_;
       marker.type = visualization_msgs::Marker::LINE_STRIP;
       marker.action = visualization_msgs::Marker::ADD;
-      marker.scale.x = 0.01;
+      marker.scale.x = 0.05;
       if (idx == best_idx) {
         marker.color.a = 1.0;
         marker.color.r = 0.0;
-        marker.color.g = 0.0;
-        marker.color.b = 1.0;
+        marker.color.g = 1.0;
+        marker.color.b = 0.0;
       } else {
         marker.color.a = 0.5;
         marker.color.r = 1.0;
@@ -1236,6 +1199,39 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
       marker.points.push_back(end_point);
       gain_vis_msg->markers.push_back(marker);      
     }    
+  }// plot the trajectory from generate_data script also
+  for (idx = 0; idx < num_cam_poses; idx++) {
+    visualization_msgs::Marker marker;
+    
+    marker.id = marker_id++;
+    marker.header.frame_id = world_frame_;
+    marker.type = visualization_msgs::Marker::LINE_STRIP;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.scale.x = 0.05;
+
+    marker.color.a = 1.0;
+    marker.color.r = 1.0;
+    marker.color.g = 0.0;
+    marker.color.b = 0.0;
+    
+    geometry_msgs::Point start_point, end_point;
+    
+    if (idx == 0) {
+      start_point.x = 0.0;
+      start_point.y = 0.0;
+      start_point.z = 0.0;
+    } else {
+      start_point.x = request.camera_poses[6*idx - 6];
+      start_point.y = request.camera_poses[6*idx - 5];
+      start_point.z = request.camera_poses[6*idx - 4];
+    }
+
+    end_point.x = request.camera_poses[6*idx];
+    end_point.y = request.camera_poses[6*idx + 1];
+    end_point.z = request.camera_poses[6*idx + 2];
+    marker.points.push_back(start_point);
+    marker.points.push_back(end_point);
+    gain_vis_msg->markers.push_back(marker); 
   }
   gain_vis_pub_.publish(gain_vis_msg);
 #endif
