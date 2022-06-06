@@ -268,7 +268,7 @@ void TsdfIntegratorBase::updateTsdfVoxel(const Point& origin,
   tsdf_voxel->weight = std::min(config_.max_weight, new_weight);
   
   // only assign interestingness to occupied voxel in the ray
-  if (tsdf_voxel->distance < voxel_size_ + 1e-6) {
+  if ((tsdf_voxel->weight > 1e-6) && (tsdf_voxel->distance < voxel_size_ + 1e-6)) {
     tsdf_voxel->interestingness = tsdf_voxel->interestingness * tsdf_voxel->interesting_weight + interestingness;
     tsdf_voxel->interesting_weight++;
     tsdf_voxel->interestingness /= tsdf_voxel->interesting_weight;

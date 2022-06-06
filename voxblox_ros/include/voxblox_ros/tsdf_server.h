@@ -42,9 +42,12 @@ namespace voxblox {
 constexpr float kDefaultMaxIntensity = 100.0;
 
 #ifdef TUNE_PARAM_
-constexpr int kNumYaw = 16; //32;
-constexpr int kNumVelZ = 8;
-constexpr int kNumVelX = 1;
+constexpr int kNumYawStep1_ = 16;
+constexpr int kNumYawStep2_ = 3; //32;
+constexpr int kNumYaw_ = kNumYawStep1_ * kNumYawStep2_;
+constexpr int kNumVelZ_ = 8; // IGNORED
+constexpr int kNumVelX_ = 1; 
+constexpr int kNumSampleToReplan = 4;
 constexpr int kNumTimestep = 15;
 constexpr double kHorizontalFov = 87.0 * M_PI/180.0;
 constexpr double kHorizontalFov_div2 = 0.5 * kHorizontalFov;
@@ -233,11 +236,11 @@ class TsdfServer {
                             const Interestingness& interestingness,
                             const bool is_freespace_pointcloud);  
   void lightInsertPointcloud(const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in,
-    std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx);
+    std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx);
 
   virtual void lightProcessPointCloudMessageAndInsert(
     const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, 
-    std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx,
+    std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx,
     const Transformation& T_G_C, const bool is_freespace_pointcloud);
 
   bool calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
@@ -252,13 +255,13 @@ class TsdfServer {
       std::vector<std::pair<Eigen::Vector3d, VoxelStatus>>& voxel_log,
       SensorParamsBase& sensor_params);
 
-  void spreadInterestingness(GlobalIndex global_index);    
+  void spreadInterestingness(std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx);    
 
   bool checkUnknownStatus(const voxblox::TsdfVoxel* voxel) const;
 
   voxblox::Layer<voxblox::TsdfVoxel>* sdf_layer_;
-  std::shared_ptr<std::vector<GlobalIndex>> interesting_voxels = std::make_shared<std::vector<GlobalIndex>>();
-  std::shared_ptr<std::vector<GlobalIndex>> observed_voxels = std::make_shared<std::vector<GlobalIndex>>();
+  std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxels = std::make_shared<AlignedQueue<GlobalIndex>>();
+  std::shared_ptr<AlignedQueue<GlobalIndex>> observed_voxels = std::make_shared<AlignedQueue<GlobalIndex>>();
 
  protected:
   /**
@@ -411,9 +414,9 @@ class TsdfServer {
   double area_factor_ = 1e5;
 
 #ifdef TUNE_PARAM_
-  // action sequence lib
-  Eigen::Matrix<double, voxblox::kNumYaw * voxblox::kNumVelX, 6 * voxblox::kNumTimestep> robot_states_;
-  Eigen::Matrix<double, voxblox::kNumYaw * voxblox::kNumVelX, 3> action_sequences_;
+  // action sequence lib 
+  Eigen::Matrix<double, kNumYaw_ * kNumVelX_, 6 * kNumTimestep> robot_states_;
+  Eigen::Matrix<double, kNumYaw_ * kNumVelX_, 3 * kNumTimestep> action_sequences_;
 #endif  
 };
 

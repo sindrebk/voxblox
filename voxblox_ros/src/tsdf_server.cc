@@ -124,30 +124,45 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
 
 #ifdef TUNE_PARAM_
   // populate action sequence array
-  for (int i = 0; i < kNumYaw * kNumVelX; i++) {
-    action_sequences_(i, 0) = 1.5; // x-vel
-    action_sequences_(i, 1) = 0.0; // z-vel
-    action_sequences_(i, 2) =
-        -kHorizontalFov_div2 +
-        i * kHorizontalFov / (kNumYaw * kNumVelX - 1);  // steering angle
+  for (int idx1 = 0; idx1 < kNumVelX_; idx1++) {
+    for (int idx2 = 0; idx2 < kNumYawStep1_; idx2++) {
+      for (int idx3 = 0; idx3 < kNumYawStep2_; idx3++) {
+        double psi_tmp = 0.0;
+        double forward_vel_tmp = 1.5;
+        Eigen::Matrix<double, 3, 1> pos_tmp{0.0, 0.0, 0.0};
+        
+        for (int j = 0; j < kNumTimestep; j++) {
+          // create the action at specific timestamp
+          int idx_seq = idx1 * kNumYaw_ + idx2 * kNumYawStep2_ + idx3;
+          action_sequences_(idx_seq, 3*j) = 1.5; // x-vel
+          action_sequences_(idx_seq, 3*j + 1) = 0.0; // z-vel
+          if (j < kNumTimestep * 0.5) {
+            action_sequences_(idx_seq, 3*j + 2) =
+                -kHorizontalFov_div2 +
+                idx2 * kHorizontalFov / (kNumYawStep1_ - 1);  // steering angle
+          }
+          else {
+            action_sequences_(idx_seq, 3*j + 2) =
+                -kHorizontalFov_div2 +
+                idx3 * kHorizontalFov / (kNumYawStep2_ - 1);  // steering angle
+          }
+          // action_sequences_(idx_seq, 3*j + 2) =
+          //   -kHorizontalFov_div2 +
+          //   idx2 * kHorizontalFov / (kNumYawStep1_ - 1);  // steering angle
+          // forward dynamics
+          for (int k = 0; k < 10; k++) {
+            forward_vel_tmp = alpha_v * forward_vel_tmp + (1 - alpha_v) * action_sequences_(idx_seq, 3*j);
+            psi_tmp = alpha_psi * psi_tmp + (1 - alpha_psi) * action_sequences_(idx_seq, 3*j + 2);
+            Eigen::Matrix<double, 3, 1> v_t;
+            v_t << forward_vel_tmp * cos(psi_tmp), forward_vel_tmp * sin(psi_tmp), 0.0;
+            pos_tmp = pos_tmp + v_t * kNumSampleToReplan/(10 * kNumTimestep); // add one marker after kNumSampleToReplan/kNumTimestep sec
+          }
 
-    double psi_tmp = 0.0;
-    double forward_vel_tmp = 1.5;
-    Eigen::Matrix<double, 3, 1> pos_tmp{0.0, 0.0, 0.0};
-    
-    for (int j = 0; j < kNumTimestep; j++) {
-      // forward dynamics
-      for (int k = 0; k < 10; k++) {
-        forward_vel_tmp = alpha_v * forward_vel_tmp + (1 - alpha_v) * action_sequences_(i, 0);
-        psi_tmp = alpha_psi * psi_tmp + (1 - alpha_psi) * action_sequences_(i, 2);
-        Eigen::Matrix<double, 3, 1> v_t;
-        v_t << forward_vel_tmp * cos(psi_tmp), forward_vel_tmp * sin(psi_tmp), 0.0;
-        pos_tmp = pos_tmp + v_t * 4/150; // add one marker after 4/150 * 10 = 4/15 sec
+          robot_states_.block<1, 3>(idx_seq, 6*j) = pos_tmp; // x-y-z position
+          // std::cout << "pos_tmp:" << pos_tmp << ", robot_states_:" << robot_states_.block<1, 3>(i, 6*j) << std::endl;
+          robot_states_(idx_seq, 6*j + 5) = psi_tmp; // yaw angle
+        }
       }
-
-      robot_states_.block<1, 3>(i, 6*j) = pos_tmp; // x-y-z position
-      // std::cout << "pos_tmp:" << pos_tmp << ", robot_states_:" << robot_states_.block<1, 3>(i, 6*j) << std::endl;
-      robot_states_(i, 6*j + 5) = psi_tmp; // yaw angle
     }
   }
 
@@ -162,6 +177,16 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
   nh_private.param("area_factor", area_factor_, area_factor_);
   std::cout << "area_factor:" << area_factor_ << std::endl;
   area_factor_ = area_factor_ / (F_X * F_Y);
+
+  // nh_private.param("kNumYawStep1", kNumYawStep1_, kNumYawStep1_);
+  // std::cout << "kNumYawStep1:" << kNumYawStep1_ << std::endl;
+  // nh_private.param("kNumYawStep2", kNumYawStep2_, kNumYawStep2_);
+  // std::cout << "kNumYawStep2:" << kNumYawStep2_ << std::endl;
+  // nh_private.param("kNumVelZ", kNumVelZ_, kNumVelZ_);
+  // std::cout << "kNumVelZ:" << kNumVelZ_ << std::endl;
+  // nh_private.param("kNumVelX", kNumVelX_, kNumVelX_);
+  // std::cout << "kNumVelX:" << kNumVelX_ << std::endl;
+  // kNumYaw_ = kNumYawStep1_ * kNumYawStep2_;
 
   sdf_layer_ = getTsdfMapPtr()->getTsdfLayerPtr();
 
@@ -681,9 +706,10 @@ void TsdfServer::publishMapEvent(const ros::TimerEvent& /*event*/) {
 }
 
 void TsdfServer::clear() {
+  // interesting_voxels->clear();
+  interesting_voxels = std::make_shared<AlignedQueue<GlobalIndex>>(); // when new voxel is created, voxel->in_queue = false
   tsdf_map_->getTsdfLayerPtr()->removeAllBlocks();
   mesh_layer_->clear();
-  interesting_voxels->clear();
 
   // Publish a message to reset the map to all subscribers.
   if (publish_tsdf_map_) {
@@ -720,7 +746,7 @@ void TsdfServer::integratePointcloud(const Transformation& T_G_C,
 }
 
 void TsdfServer::lightProcessPointCloudMessageAndInsert(
-    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx,
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx,
     const Transformation& T_G_C, const bool is_freespace_pointcloud) {
   Pointcloud points_C;
   Colors colors;
@@ -775,12 +801,12 @@ void TsdfServer::lightProcessPointCloudMessageAndInsert(
               p_tmp, 1.0/voxel_size);
     voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
     if (voxel != nullptr) {
-      if (!voxel->in_queue) {
-        voxel->in_queue = true;
-        if (voxel->interestingness > 0.0) {
+      if (voxel->interestingness > 0.0) {
+        if (!voxel->in_queue) {
           voxel->interesting_distance = 0.0;
           // std::cout << "voxel->interestingness:" << voxel->interestingness;
-          interesting_voxel_idx->push_back(global_index);
+          voxel->in_queue = true;
+          interesting_voxel_idx->push(global_index);
         }
       }
     }
@@ -795,7 +821,7 @@ void TsdfServer::lightProcessPointCloudMessageAndInsert(
 
 void TsdfServer::lightInsertPointcloud(
     const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in,
-    std::shared_ptr<std::vector<GlobalIndex>> interesting_voxel_idx) {
+    std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx) {
   Transformation T_G_C;
   T_G_C.setIdentity();
 
@@ -910,8 +936,8 @@ float TsdfServer::getScanStatus(
   //     12.0;  // After this much distance stick to the last interpolation
   //            // distance
 
-  const voxblox::Point start_scaled =
-      pos.cast<voxblox::FloatingPoint>() * voxel_size_inv;
+  // const voxblox::Point start_scaled =
+  //     pos.cast<voxblox::FloatingPoint>() * voxel_size_inv;
   // const float distance_thres =
       // occupancy_distance_voxelsize_factor_ * sdf_layer_->voxel_size() + 1e-6;
   const float distance_thres = voxel_size + 1e-6;
@@ -934,14 +960,14 @@ float TsdfServer::getScanStatus(
   // voxel_log.reserve(multiray_endpoints.size() *
   // tsdf_integrator_config_.max_ray_length_m * voxel_size_inv); //optimize for
   // number of rays
-  Point origin;
-  origin << 0.0, 0.0, 0.0;
+
   TsdfIntegratorBase::Config integrator_config = tsdf_integrator_->getConfig();
   voxblox::GlobalIndex global_index;
+  Point point_pos = pos.cast<voxblox::FloatingPoint>();
   for (size_t i = 0; i < multiray_endpoints.size(); ++i) {
-  
-    RayCaster ray_caster(origin, multiray_endpoints[i].cast<voxblox::FloatingPoint>(), false,
-                         integrator_config.voxel_carving_enabled,
+    RayCaster ray_caster(point_pos,
+                         multiray_endpoints[i].cast<voxblox::FloatingPoint>(),
+                         false, integrator_config.voxel_carving_enabled,
                          integrator_config.max_ray_length_m, voxel_size_inv,
                          integrator_config.default_truncation_distance, true);
 
@@ -952,10 +978,11 @@ float TsdfServer::getScanStatus(
         if (voxel != nullptr) {
           if (!voxel->is_observed) {
             voxel->is_observed = true;
-            observed_voxels->push_back(global_index);
+            observed_voxels->push(global_index);
             ++num_unknown_voxels;
             Point voxel_center = getCenterPointFromGridIndex(global_index, voxel_size);
-            double z2 = voxel_center(0) * voxel_center(0) + voxel_center(1) * voxel_center(1) + voxel_center(2) * voxel_center(2);
+            Point dist = voxel_center - point_pos;
+            double z2 = dist(0) * dist(0) + dist(1) * dist(1) + dist(2) * dist(2);
             interestingness += voxel->interestingness * exp(-area_factor_ * z2); // COUNT INTERESTINGNESS OF UNKNOWN VOXEL
           }
         }
@@ -964,7 +991,7 @@ float TsdfServer::getScanStatus(
       else if (voxel->distance > distance_thres) {
         if (!voxel->is_observed) {
           voxel->is_observed = true;
-          observed_voxels->push_back(global_index);
+          observed_voxels->push(global_index);
           ++num_free_voxels;
         }
       }
@@ -972,10 +999,11 @@ float TsdfServer::getScanStatus(
       else {
         if (!voxel->is_observed) {
           voxel->is_observed = true;
-          observed_voxels->push_back(global_index);
+          observed_voxels->push(global_index);
           ++num_occupied_voxels;
           Point voxel_center = getCenterPointFromGridIndex(global_index, voxel_size);
-          double z2 = voxel_center(0) * voxel_center(0) + voxel_center(1) * voxel_center(1) + voxel_center(2) * voxel_center(2);          
+          Point dist = voxel_center - point_pos;
+          double z2 = dist(0) * dist(0) + dist(1) * dist(1) + dist(2) * dist(2);         
           interestingness += voxel->interestingness * exp(-area_factor_ * z2); // COUNT INTERESTINGNESS OF OCCUPIED VOXEL
         }
         break; // STOP ray casting when we hit an occupied voxel
@@ -1046,40 +1074,33 @@ void TsdfServer::computeVolumetricGainRayModelNoBound(StateVec& state,
   vgain.gain = interestingness;
 }
 
-void TsdfServer::spreadInterestingness(GlobalIndex global_index) {
-  voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
-  CHECK_NOTNULL(voxel);
+void TsdfServer::spreadInterestingness(std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx) {
+  while (!interesting_voxel_idx->empty()) {
+    // Get the global indices of neighbors.
+    const GlobalIndex global_index_tmp = interesting_voxel_idx->front();
+    interesting_voxel_idx->pop();
+    voxblox::TsdfVoxel* parent_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index_tmp);
+    Neighborhood<>::IndexMatrix neighbor_indices;
+    Neighborhood<>::getFromGlobalIndex(global_index_tmp, &neighbor_indices);
 
-  if (decay_distance_ > 0.0) {
-    AlignedQueue<GlobalIndex> voxel_queue;
-    voxel_queue.push(global_index);
-    while (!voxel_queue.empty()) {
-      // Get the global indices of neighbors.
-      const GlobalIndex global_index_tmp = voxel_queue.front();
-      voxel_queue.pop();
-      voxblox::TsdfVoxel* parent_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index_tmp);
-      Neighborhood<>::IndexMatrix neighbor_indices;
-      Neighborhood<>::getFromGlobalIndex(global_index_tmp, &neighbor_indices);
-
-      // Go through the neighbors and see if we can update any of them.
-      for (unsigned int idx = 0u; idx < neighbor_indices.cols(); ++idx) {
-        const GlobalIndex& neighbor_index = neighbor_indices.col(idx);
-        voxblox::TsdfVoxel* neighbor_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(neighbor_index);        
-        if (neighbor_voxel == nullptr) { // can miss some unknown voxels here!
-          continue;
+    // Go through the neighbors and see if we can update any of them.
+    for (unsigned int idx = 0u; idx < neighbor_indices.cols(); ++idx) {
+      const GlobalIndex& neighbor_index = neighbor_indices.col(idx);
+      voxblox::TsdfVoxel* neighbor_voxel = sdf_layer_->getVoxelPtrByGlobalIndex(neighbor_index);        
+      if (neighbor_voxel == nullptr) { // can miss some unknown voxels here!
+        continue;
+      }
+      // update interesting level if this's unknown voxel and need to be updated
+      if (checkUnknownStatus(neighbor_voxel)) {
+        if (neighbor_voxel->interesting_distance > parent_voxel->interesting_distance + 1) {
+          neighbor_voxel->interesting_distance = parent_voxel->interesting_distance + 1; // Manhattan distance
+          neighbor_voxel->interestingness = decay_lambda_ * parent_voxel->interestingness; // decay function
         }
-        // update interesting level if this's unknown voxel and need to be updated
-        if (checkUnknownStatus(neighbor_voxel)) {
-          if (neighbor_voxel->interesting_distance > parent_voxel->interesting_distance + 1) {
-            neighbor_voxel->interesting_distance = parent_voxel->interesting_distance + 1; // Manhattan distance
-            neighbor_voxel->interestingness = decay_lambda_ * parent_voxel->interestingness; // decay function
-          }
-          // stop the spreading when the voxel is too far away from the original interesting voxels
-          if (!neighbor_voxel->in_queue &&
-              (neighbor_voxel->interesting_distance < decay_distance_)) {  
-            voxel_queue.push(neighbor_index);
-            neighbor_voxel->in_queue = true;
-          }
+        // stop the spreading when the voxel is too far away from the original interesting voxels
+        if (!neighbor_voxel->in_queue &&
+            (neighbor_voxel->interesting_distance < decay_distance_)) {  
+          interesting_voxel_idx->push(neighbor_index);
+          neighbor_voxel->in_queue = true;
         }
       }
     }
@@ -1096,12 +1117,9 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
   // auto start = std::chrono::steady_clock::now();
   sensor_msgs::PointCloud2::Ptr pcl_in = boost::make_shared<sensor_msgs::PointCloud2>(request.pcl);
   lightInsertPointcloud(pcl_in, interesting_voxels);
-  
-  // spread interestingness out
-  for (idx = 0; idx < interesting_voxels->size(); idx++) {
-    // get the global index by coordinate
-    // get the voxel, set interesting_distance = 0
-    spreadInterestingness(interesting_voxels->at(idx));
+
+  if (decay_distance_ > 0.0) {
+    spreadInterestingness(interesting_voxels);
   }
 
   if (publish_pointclouds_on_update_) {
@@ -1118,48 +1136,49 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
     computeVolumetricGainRayModelNoBound(state_vec, vgain);
     response.info_gain.push_back(vgain.gain);
     // reset observed_voxels for next frame
-    for (idx2 = 0; idx2 < observed_voxels->size(); idx2++) {
-      voxblox::GlobalIndex global_index = observed_voxels->at(idx2);
+    while (!observed_voxels->empty()) {
+      voxblox::GlobalIndex global_index = observed_voxels->front();
       voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
       voxel->is_observed = false;
+      observed_voxels->pop();
     }
-    observed_voxels->clear();
   }
   
 #ifdef TUNE_PARAM_  
   // evalute all the sequences
-  std::array<double, kNumYaw * kNumVelX> seq_gains;
-  for (idx = 0; idx < kNumYaw * kNumVelX; idx++) {
+  std::array<double, kNumYaw_ * kNumVelX_> seq_gains;
+  for (idx = 0; idx < kNumYaw_ * kNumVelX_; idx++) {
     seq_gains[idx] = 0.0;
+    std::cout << "idx:" << idx << std::endl;
     for (idx2 = 0; idx2 < 6 * kNumTimestep; idx2 = idx2 + 6) {
       state_vec << robot_states_(idx, idx2), robot_states_(idx, idx2 + 1),
           robot_states_(idx, idx2 + 2), 0.0, 0.0, robot_states_(idx, idx2 + 5);
 
       computeVolumetricGainRayModelNoBound(state_vec, vgain);
       seq_gains[idx] += vgain.gain;
+      std::cout << "timestep:" << idx2/6 << ", gain:" << vgain.gain << std::endl;
 
       // reset observed_voxels for next frame
-      for (int idx3 = 0; idx3 < observed_voxels->size(); idx3++) {
-        voxblox::GlobalIndex global_index = observed_voxels->at(idx3);
+      while (!observed_voxels->empty()) {
+        voxblox::GlobalIndex global_index = observed_voxels->front();
         voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
         voxel->is_observed = false;
-      }
-      observed_voxels->clear();            
+        observed_voxels->pop();
+      }           
     }
   }
   // pick the best one
   // visualization
   visualization_msgs::MarkerArray::Ptr gain_vis_msg = boost::make_shared<visualization_msgs::MarkerArray>();
   int marker_id = 0;
-  // int best_idx = 0;
   int best_idx = std::max_element(seq_gains.begin(), seq_gains.end()) - seq_gains.begin();
-  
+  std::cout << "BEST IDX:" << best_idx << std::endl;
   std::cout << "seq_gains:" << std::endl;
-  for (idx = 0; idx < kNumYaw; idx++) {
+  for (idx = 0; idx < kNumYaw_; idx++) {
     std::cout << "idx:" << idx << "," << seq_gains[idx] << std::endl;
   }
   
-  for (idx = 0; idx < kNumYaw * kNumVelX; idx++) {
+  for (idx = 0; idx < kNumYaw_ * kNumVelX_; idx++) {
     for (idx2 = 0; idx2 < kNumTimestep; idx2++) {
       visualization_msgs::Marker marker;
       
