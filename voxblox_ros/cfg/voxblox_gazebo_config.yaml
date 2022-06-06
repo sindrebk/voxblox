@@ -18,8 +18,8 @@ method: "fast"
 integration_order_mode: "sorted"
 # max_consecutive_ray_collisions: 2
 # start_voxel_subsampling_factor: 2
-publish_pointclouds: True
-publish_pointclouds_on_update: True
+publish_pointclouds: False #True
+publish_pointclouds_on_update: False #True
 allow_clear: True
 pointcloud_queue_size: 5
 min_time_between_msgs_sec: 0.0

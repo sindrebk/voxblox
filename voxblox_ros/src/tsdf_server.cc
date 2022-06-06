@@ -1149,14 +1149,14 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
   std::array<double, kNumYaw_ * kNumVelX_> seq_gains;
   for (idx = 0; idx < kNumYaw_ * kNumVelX_; idx++) {
     seq_gains[idx] = 0.0;
-    std::cout << "idx:" << idx << std::endl;
+    // std::cout << "idx:" << idx << std::endl;
     for (idx2 = 0; idx2 < 6 * kNumTimestep; idx2 = idx2 + 6) {
       state_vec << robot_states_(idx, idx2), robot_states_(idx, idx2 + 1),
           robot_states_(idx, idx2 + 2), 0.0, 0.0, robot_states_(idx, idx2 + 5);
 
       computeVolumetricGainRayModelNoBound(state_vec, vgain);
       seq_gains[idx] += vgain.gain;
-      std::cout << "timestep:" << idx2/6 << ", gain:" << vgain.gain << std::endl;
+      // std::cout << "timestep:" << idx2/6 << ", gain:" << vgain.gain << std::endl;
 
       // reset observed_voxels for next frame
       while (!observed_voxels->empty()) {
@@ -1167,17 +1167,18 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
       }           
     }
   }
+  
   // pick the best one
-  // visualization
-  visualization_msgs::MarkerArray::Ptr gain_vis_msg = boost::make_shared<visualization_msgs::MarkerArray>();
-  int marker_id = 0;
   int best_idx = std::max_element(seq_gains.begin(), seq_gains.end()) - seq_gains.begin();
   std::cout << "BEST IDX:" << best_idx << std::endl;
   std::cout << "seq_gains:" << std::endl;
   for (idx = 0; idx < kNumYaw_; idx++) {
     std::cout << "idx:" << idx << "," << seq_gains[idx] << std::endl;
   }
-  
+
+  // visualization
+  visualization_msgs::MarkerArray::Ptr gain_vis_msg = boost::make_shared<visualization_msgs::MarkerArray>();
+  int marker_id = 0;
   for (idx = 0; idx < kNumYaw_ * kNumVelX_; idx++) {
     for (idx2 = 0; idx2 < kNumTimestep; idx2++) {
       visualization_msgs::Marker marker;
@@ -1218,7 +1219,9 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
       marker.points.push_back(end_point);
       gain_vis_msg->markers.push_back(marker);      
     }    
-  }// plot the trajectory from generate_data script also
+  }
+  
+  // plot the trajectory from generate_data script also
   for (idx = 0; idx < num_cam_poses; idx++) {
     visualization_msgs::Marker marker;
     
