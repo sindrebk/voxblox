@@ -131,9 +131,9 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
         double forward_vel_tmp = 1.5;
         Eigen::Matrix<double, 3, 1> pos_tmp{0.0, 0.0, 0.0};
         
+        int idx_seq = idx1 * kNumYaw_ + idx2 * kNumYawStep2_ + idx3;
         for (int j = 0; j < kNumTimestep; j++) {
           // create the action at specific timestamp
-          int idx_seq = idx1 * kNumYaw_ + idx2 * kNumYawStep2_ + idx3;
           action_sequences_(idx_seq, 3*j) = 1.5; // x-vel
           action_sequences_(idx_seq, 3*j + 1) = 0.0; // z-vel
           if (j < kNumTimestep * 0.5) {
@@ -862,23 +862,6 @@ void SensorParamsBase::initialize() {
   // Assume the range is along the hypotenuse of the right angle.
   double h_2 = fov[0] / 2;
   double v_2 = fov[1] / 2;
-  Eigen::Vector3d pTL(cos(h_2), sin(h_2), sin(v_2));
-  Eigen::Vector3d pTR(cos(h_2), -sin(h_2), sin(v_2));
-  Eigen::Vector3d pBR(cos(h_2), -sin(h_2), -sin(v_2));
-  Eigen::Vector3d pBL(cos(h_2), sin(h_2), -sin(v_2));
-  edge_points.col(0) = pTL;
-  edge_points.col(1) = pTR;
-  edge_points.col(2) = pBR;
-  edge_points.col(3) = pBL;
-  // Compute normal vectors for 4 planes. (normalized)
-  normal_vectors.col(0) = edge_points.col(0).cross(edge_points.col(1));
-  normal_vectors.col(1) = edge_points.col(1).cross(edge_points.col(2));
-  normal_vectors.col(2) = edge_points.col(2).cross(edge_points.col(3));
-  normal_vectors.col(3) = edge_points.col(3).cross(edge_points.col(0));
-  // Compute correct points based on the sensor range.
-  edge_points = max_range * edge_points;
-  // edge_points_B = rot_B2S * edge_points;
-  edge_points_B = edge_points;
   // Frustum endpoints in (S) for gain calculation.
   frustum_endpoints.clear();
   frustum_endpoints_B.clear();
@@ -893,9 +876,9 @@ void SensorParamsBase::initialize() {
       if (width == 0) {
         ++w;
       }
-      double x = max_range * cos(dh);
-      double y = max_range * sin(dh);
-      double z = max_range * sin(dv);
+      double x = max_range;
+      double y = max_range * tan(dh);
+      double z = max_range * tan(dv);
       Eigen::Vector3d ep = Eigen::Vector3d(x, y, z);
       frustum_endpoints.push_back(ep);
       // Eigen::Vector3d ep_B = rot_B2S * ep + center_offset;
