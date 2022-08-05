@@ -159,6 +159,8 @@ class TsdfServer {
   void getServerConfigFromRosParam(const ros::NodeHandle& nh_private);
 
   void insertPointcloud(const sensor_msgs::PointCloud2::Ptr& pointcloud);
+  void insertPointcloudWithInterestingness(
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in);
 
   void insertFreespacePointcloud(
       const sensor_msgs::PointCloud2::Ptr& pointcloud);
@@ -166,6 +168,9 @@ class TsdfServer {
   virtual void processPointCloudMessageAndInsert(
       const sensor_msgs::PointCloud2::Ptr& pointcloud_msg,
       const Transformation& T_G_C, const bool is_freespace_pointcloud);
+  virtual void processPointCloudMessageAndInsertWithInterestingness(
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx,
+    const Transformation& T_G_C, const bool is_freespace_pointcloud);
 
   void integratePointcloud(const Transformation& T_G_C,
                            const Pointcloud& ptcloud_C, const Colors& colors,

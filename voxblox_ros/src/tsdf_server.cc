@@ -57,8 +57,10 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
 
   nh_private_.param("pointcloud_queue_size", pointcloud_queue_size_,
                     pointcloud_queue_size_);
+  // pointcloud_sub_ = nh_.subscribe("pointcloud", pointcloud_queue_size_,
+  //                                 &TsdfServer::insertPointcloud, this);
   pointcloud_sub_ = nh_.subscribe("pointcloud", pointcloud_queue_size_,
-                                  &TsdfServer::insertPointcloud, this);
+                                  &TsdfServer::insertPointcloudWithInterestingness, this);                                  
 
   mesh_pub_ = nh_private_.advertise<voxblox_msgs::Mesh>("mesh", 1, true);
 
@@ -402,6 +404,93 @@ void TsdfServer::processPointCloudMessageAndInsert(
   newPoseCallback(T_G_C);
 }
 
+void TsdfServer::processPointCloudMessageAndInsertWithInterestingness(
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg, std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx,
+    const Transformation& T_G_C, const bool is_freespace_pointcloud) {
+
+  Pointcloud points_C;
+  Colors colors;
+  Interestingness interestingness;
+  timing::Timer ptcloud_timer("ptcloud_preprocess");
+
+  pcl::PointCloud<pcl::PointXYZI> pointcloud_pcl;
+  // pointcloud_pcl is modified below:
+  pcl::fromROSMsg(*pointcloud_msg, pointcloud_pcl);
+  convertPointcloud(pointcloud_pcl, color_map_, &points_C, &colors, &interestingness);
+  ptcloud_timer.Stop();
+
+  Transformation T_G_C_refined = T_G_C;
+
+  if (verbose_) {
+    ROS_INFO("Integrating a pointcloud with %lu points.", points_C.size());
+  }
+
+  ros::WallTime start = ros::WallTime::now();
+  integratePointcloud(T_G_C_refined, points_C, colors, interestingness, is_freespace_pointcloud);
+  ros::WallTime end = ros::WallTime::now();
+  if (verbose_) {
+    ROS_INFO("Finished integrating in %f seconds, have %lu blocks.",
+             (end - start).toSec(),
+             tsdf_map_->getTsdfLayer().getNumberOfAllocatedBlocks());
+  }
+
+  // populate interesting voxel idx
+  // filter points that have interestingness > threshold
+  // std::cout << "PointCloud before filtering: " << pointcloud_pcl.width * pointcloud_pcl.height 
+  //      << " data points (" << pcl::getFieldsList(pointcloud_pcl) << ")." << std::endl;
+  pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_out(new pcl::PointCloud<pcl::PointXYZI>);
+  pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_in(new pcl::PointCloud<pcl::PointXYZI>);
+  *pcl_in = pointcloud_pcl;
+  pcl::PassThrough<pcl::PointXYZI> pass_filter;
+  pass_filter.setInputCloud(pcl_in);
+  pass_filter.setFilterFieldName("intensity");
+  pass_filter.setFilterLimits(0.5, 1.0);
+  pass_filter.filter(*pcl_out);
+  // std::cout << "PointCloud after pass filtering: " << pcl_out->width * pcl_out->height 
+  //      << " data points (" << pcl::getFieldsList(*pcl_out) << ")." << std::endl;    
+  
+  // voxel filter
+  pcl::VoxelGrid<pcl::PointXYZI> voxel_filter;
+  voxel_filter.setInputCloud(pcl_out);
+  voxel_filter.setLeafSize(0.05f, 0.05f, 0.05f);
+  voxel_filter.filter(*pcl_out);
+  // std::cout << "PointCloud after voxel filtering: " << pcl_out->width * pcl_out->height 
+  //      << " data points (" << pcl::getFieldsList(*pcl_out) << ")." << std::endl;  
+  
+  // get their global_voxel_idx
+  const float voxel_size = sdf_layer_->voxel_size();
+  for (auto p: pcl_out->points) {
+    Point p_tmp;
+    p_tmp << p.x, p.y, p.z;
+    p_tmp = T_G_C_refined * p_tmp; // convert to world frame
+    voxblox::GlobalIndex global_index = voxblox::getGridIndexFromPoint<voxblox::GlobalIndex>(
+              p_tmp, 1.0/voxel_size);
+    voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
+    if (voxel != nullptr) {
+      if (voxel->interestingness > 0.0) {
+        if (!voxel->in_queue) {
+          voxel->interesting_distance = 0.0;
+          // std::cout << "voxel->interestingness:" << voxel->interestingness;
+          voxel->in_queue = true;
+          interesting_voxel_idx->push(global_index);
+        }
+      }
+    }
+  }
+
+  std::cout << "interesting_voxel_idx->size():" << interesting_voxel_idx->size() << std::endl;
+
+  // timing::Timer block_remove_timer("remove_distant_blocks");
+  // tsdf_map_->getTsdfLayerPtr()->removeDistantBlocks(
+  //     T_G_C.getPosition(), max_block_distance_from_body_);
+  // mesh_layer_->clearDistantMesh(T_G_C.getPosition(),
+  //                               max_block_distance_from_body_);
+  // block_remove_timer.Stop();
+
+  // Callback for inheriting classes.
+  newPoseCallback(T_G_C);
+}
+
 // Checks if we can get the next message from queue.
 bool TsdfServer::getNextPointcloudFromQueue(
     std::queue<sensor_msgs::PointCloud2::Ptr>* queue,
@@ -447,6 +536,41 @@ void TsdfServer::insertPointcloud(
     constexpr bool is_freespace_pointcloud = false;
     processPointCloudMessageAndInsert(pointcloud_msg, T_G_C,
                                       is_freespace_pointcloud);
+    processed_any = true;
+  }
+
+  if (!processed_any) {
+    return;
+  }
+
+  if (publish_pointclouds_on_update_) {
+    publishPointclouds();
+  }
+
+  if (verbose_) {
+    ROS_INFO_STREAM("Timings: " << std::endl << timing::Timing::Print());
+    ROS_INFO_STREAM(
+        "Layer memory: " << tsdf_map_->getTsdfLayer().getMemorySize());
+  }
+}
+
+void TsdfServer::insertPointcloudWithInterestingness(
+    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in) {
+  if (pointcloud_msg_in->header.stamp - last_msg_time_ptcloud_ >
+      min_time_between_msgs_) {
+    last_msg_time_ptcloud_ = pointcloud_msg_in->header.stamp;
+    // So we have to process the queue anyway... Push this back.
+    pointcloud_queue_.push(pointcloud_msg_in);
+  }
+
+  Transformation T_G_C;
+  sensor_msgs::PointCloud2::Ptr pointcloud_msg;
+  bool processed_any = false;
+  while (
+      getNextPointcloudFromQueue(&pointcloud_queue_, &pointcloud_msg, &T_G_C)) {
+    constexpr bool is_freespace_pointcloud = false;
+    processPointCloudMessageAndInsertWithInterestingness(pointcloud_msg, interesting_voxels, T_G_C,
+                                      is_freespace_pointcloud); // TODO: after 1 insertion, what happens to interesting_voxels???
     processed_any = true;
   }
 
@@ -819,7 +943,7 @@ void TsdfServer::lightProcessPointCloudMessageAndInsert(
   }
 }
 
-void TsdfServer::lightInsertPointcloud(
+void TsdfServer::lightInsertPointcloud( // only works for single pcl
     const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in,
     std::shared_ptr<AlignedQueue<GlobalIndex>> interesting_voxel_idx) {
   Transformation T_G_C;
