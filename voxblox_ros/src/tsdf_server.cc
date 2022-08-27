@@ -124,51 +124,41 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
   camera_param.resolution << kRaycastingHorizontalRes, kRaycastingVerticalRes;
   camera_param.initialize();
 
-#ifdef TUNE_PARAM_
-  // populate action sequence array
   for (int idx1 = 0; idx1 < kNumVelX_; idx1++) {
-    for (int idx2 = 0; idx2 < kNumYawStep1_; idx2++) {
-      for (int idx3 = 0; idx3 < kNumYawStep2_; idx3++) {
+    for (int idx2 = 0; idx2 < kNumVelZ_; idx2++) {
+      for (int idx3 = 0; idx3 < kNumYaw_; idx3++) {
         double psi_tmp = 0.0;
-        double forward_vel_tmp = 1.5;
+        double forward_vel_tmp = 1.0; // TODO: get current vel x, z
+        double vertical_vel_tmp = 0.0;
         Eigen::Matrix<double, 3, 1> pos_tmp{0.0, 0.0, 0.0};
         
-        int idx_seq = idx1 * kNumYaw_ + idx2 * kNumYawStep2_ + idx3;
+        int idx_seq = idx1 * kNumYaw_ * kNumVelZ_ + idx2 * kNumYaw_ + idx3;
         for (int j = 0; j < kNumTimestep; j++) {
           // create the action at specific timestamp
-          action_sequences_(idx_seq, 3*j) = 1.5; // x-vel
-          action_sequences_(idx_seq, 3*j + 1) = 0.0; // z-vel
-          if (j < kNumTimestep * 0.5) {
-            action_sequences_(idx_seq, 3*j + 2) =
-                -kHorizontalFov_div2 +
-                idx2 * kHorizontalFov / (kNumYawStep1_ - 1);  // steering angle
-          }
-          else {
-            action_sequences_(idx_seq, 3*j + 2) =
-                -kHorizontalFov_div2 +
-                idx3 * kHorizontalFov / (kNumYawStep2_ - 1);  // steering angle
-          }
-          // action_sequences_(idx_seq, 3*j + 2) =
-          //   -kHorizontalFov_div2 +
-          //   idx2 * kHorizontalFov / (kNumYawStep1_ - 1);  // steering angle
+          action_sequences_(idx_seq, 3*j) = 1.0; // TODO: should have multiple values
+          double angle_z = -kVerticalFov_div2 + idx2 * kVerticalFov / (kNumVelZ_ - 1);
+          action_sequences_(idx_seq, 3*j + 1) = action_sequences_(idx_seq, 3*j) * tan(angle_z); 
+          action_sequences_(idx_seq, 3*j + 2) =
+              -kHorizontalFov_div2 + idx3 * kHorizontalFov / (kNumYaw_ - 1);  // steering angle
+
           // forward dynamics
+          // TODO: this is robot's pose, transform a bit to get camera's pose
           for (int k = 0; k < 10; k++) {
             forward_vel_tmp = alpha_v * forward_vel_tmp + (1 - alpha_v) * action_sequences_(idx_seq, 3*j);
+            vertical_vel_tmp = alpha_v * vertical_vel_tmp + (1 - alpha_v) * action_sequences_(idx_seq, 3*j + 1);
             psi_tmp = alpha_psi * psi_tmp + (1 - alpha_psi) * action_sequences_(idx_seq, 3*j + 2);
             Eigen::Matrix<double, 3, 1> v_t;
-            v_t << forward_vel_tmp * cos(psi_tmp), forward_vel_tmp * sin(psi_tmp), 0.0;
-            pos_tmp = pos_tmp + v_t * kNumSampleToReplan/(10 * kNumTimestep); // add one marker after kNumSampleToReplan/kNumTimestep sec
+            v_t << forward_vel_tmp * cos(psi_tmp), forward_vel_tmp * sin(psi_tmp), vertical_vel_tmp;
+            pos_tmp = pos_tmp + v_t * kSkipStepGenerate/(10 * kNumTimestep); // add one marker after kSkipStepGenerate/kNumTimestep sec
           }
 
-          robot_states_.block<1, 3>(idx_seq, 6*j) = pos_tmp; // x-y-z position
-          // std::cout << "pos_tmp:" << pos_tmp << ", robot_states_:" << robot_states_.block<1, 3>(i, 6*j) << std::endl;
-          robot_states_(idx_seq, 6*j + 5) = psi_tmp; // yaw angle
+          camera_states_.block<1, 3>(idx_seq, 6*j) = pos_tmp; // x-y-z position
+          // std::cout << "pos_tmp:" << pos_tmp << ", camera_states_:" << camera_states_.block<1, 3>(i, 6*j) << std::endl;
+          camera_states_(idx_seq, 6*j + 5) = psi_tmp; // yaw angle
         }
       }
     }
   }
-
-#endif
 
   // param for decay function
   nh_private.param("decay_lambda", decay_lambda_, decay_lambda_);
@@ -195,6 +185,8 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
   // Advertise services.
   calc_info_gain_srv_ = nh_private_.advertiseService(
       "calc_info_gain", &TsdfServer::calcInfoGainCallback, this);
+  baseline_info_gain_srv_ = nh_private_.advertiseService(
+      "baseline_info_gain", &TsdfServer::baselineInfoGainCallback, this);
   generate_mesh_srv_ = nh_private_.advertiseService(
       "generate_mesh", &TsdfServer::generateMeshCallback, this);
   clear_map_srv_ = nh_private_.advertiseService(
@@ -569,8 +561,9 @@ void TsdfServer::insertPointcloudWithInterestingness(
   while (
       getNextPointcloudFromQueue(&pointcloud_queue_, &pointcloud_msg, &T_G_C)) {
     constexpr bool is_freespace_pointcloud = false;
+    // the interestingness of a voxel is the average of all interestingness of everypoints in that voxel (TsdfIntegratorBase::updateTsdfVoxel)
     processPointCloudMessageAndInsertWithInterestingness(pointcloud_msg, interesting_voxels, T_G_C,
-                                      is_freespace_pointcloud); // TODO: after 1 insertion, what happens to interesting_voxels???
+                                      is_freespace_pointcloud); 
     processed_any = true;
   }
 
@@ -1253,13 +1246,13 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
   
 #ifdef TUNE_PARAM_  
   // evalute all the sequences
-  std::array<double, kNumYaw_ * kNumVelX_> seq_gains;
-  for (idx = 0; idx < kNumYaw_ * kNumVelX_; idx++) {
+  std::array<double, kNumYaw_ * kNumVelZ_ * kNumVelX_> seq_gains;
+  for (idx = 0; idx < kNumYaw_ * kNumVelZ_ * kNumVelX_; idx++) {
     seq_gains[idx] = 0.0;
     // std::cout << "idx:" << idx << std::endl;
     for (idx2 = 0; idx2 < 6 * kNumTimestep; idx2 = idx2 + 6) {
-      state_vec << robot_states_(idx, idx2), robot_states_(idx, idx2 + 1),
-          robot_states_(idx, idx2 + 2), 0.0, 0.0, robot_states_(idx, idx2 + 5);
+      state_vec << camera_states_(idx, idx2), camera_states_(idx, idx2 + 1),
+          camera_states_(idx, idx2 + 2), 0.0, 0.0, camera_states_(idx, idx2 + 5);
 
       computeVolumetricGainRayModelNoBound(state_vec, vgain);
       seq_gains[idx] += vgain.gain;
@@ -1286,7 +1279,7 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
   // visualization
   visualization_msgs::MarkerArray::Ptr gain_vis_msg = boost::make_shared<visualization_msgs::MarkerArray>();
   int marker_id = 0;
-  for (idx = 0; idx < kNumYaw_ * kNumVelX_; idx++) {
+  for (idx = 0; idx < kNumYaw_ * kNumVelZ_ * kNumVelX_; idx++) {
     for (idx2 = 0; idx2 < kNumTimestep; idx2++) {
       visualization_msgs::Marker marker;
       
@@ -1314,14 +1307,14 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
         start_point.y = 0.0;
         start_point.z = 0.0;
       } else {
-        start_point.x = robot_states_(idx, 6*idx2 - 6);
-        start_point.y = robot_states_(idx, 6*idx2 - 5);
-        start_point.z = robot_states_(idx, 6*idx2 - 4);
+        start_point.x = camera_states_(idx, 6*idx2 - 6);
+        start_point.y = camera_states_(idx, 6*idx2 - 5);
+        start_point.z = camera_states_(idx, 6*idx2 - 4);
       }
 
-      end_point.x = robot_states_(idx, 6*idx2);
-      end_point.y = robot_states_(idx, 6*idx2 + 1);
-      end_point.z = robot_states_(idx, 6*idx2 + 2);
+      end_point.x = camera_states_(idx, 6*idx2);
+      end_point.y = camera_states_(idx, 6*idx2 + 1);
+      end_point.z = camera_states_(idx, 6*idx2 + 2);
       marker.points.push_back(start_point);
       marker.points.push_back(end_point);
       gain_vis_msg->markers.push_back(marker);      
@@ -1375,6 +1368,103 @@ bool TsdfServer::calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
   // std::cout << "INTEGRATE time: " << elapsed_seconds_integrate.count() << "s\n";
   // std::cout << "INFO_GAIN time: " << elapsed_seconds_info_gain.count() << "s\n";
   // std::cout << "CLEAR time: " << elapsed_seconds_clear.count() << "s\n";
+  return true;
+}
+
+bool TsdfServer::baselineInfoGainCallback(voxblox_msgs::InfoGainBaseline::Request& request,
+                                      voxblox_msgs::InfoGainBaseline::Response& response) {
+  int idx, idx2 = 0;
+  StateVec state_vec;
+  response.info_gain.reserve(kNumYaw_ * kNumVelZ_ * kNumVelX_);
+  
+  // rotate and translate camera_states
+  Eigen::Matrix3d yaw_matrix;
+  yaw_matrix = Eigen::AngleAxisd(-request.robot_pose[5], Eigen::Vector3d::UnitZ());
+  Eigen::Vector3d translation;
+  translation << request.robot_pose[0], request.robot_pose[1], request.robot_pose[2];
+  for (idx = 0; idx < kNumTimestep; idx = idx + 1) {
+    camera_states_rotated_.middleCols(3*idx, 3) = camera_states_.middleCols(6*idx, 3) * yaw_matrix;
+    camera_states_rotated_.middleCols(3*idx, 3).rowwise() += translation.transpose(); 
+  }
+
+  // evalute all the sequences in the library
+  std::array<double, kNumYaw_ * kNumVelZ_ * kNumVelX_> seq_gains;
+  for (idx = 0; idx < kNumYaw_ * kNumVelZ_ * kNumVelX_; idx++) {
+    seq_gains[idx] = 0.0;
+    // std::cout << "idx:" << idx << std::endl;
+    for (idx2 = 0; idx2 < kNumTimestep; idx2 = idx2 + 1) {
+      if ((idx2 == 2) || (idx2 == 6) || (idx2 == 10) || (idx2 == 14)) { // skip step 4: 2-6-10-14
+        state_vec << camera_states_rotated_(idx, 3*idx2), // assume camera frame and robot frame align with each other, no rotation
+            camera_states_rotated_(idx, 3*idx2 + 1),
+            camera_states_rotated_(idx, 3*idx2 + 2), 0.0, 0.0,
+            request.robot_pose[5] + camera_states_(idx, 6*idx2 + 5);
+
+        computeVolumetricGainRayModelNoBound(state_vec, vgain);
+        seq_gains[idx] += vgain.gain;
+        // std::cout << "timestep:" << idx2/6 << ", gain:" << vgain.gain << std::endl;
+
+        // reset observed_voxels for next frame
+        while (!observed_voxels->empty()) {
+          voxblox::GlobalIndex global_index = observed_voxels->front();
+          voxblox::TsdfVoxel* voxel = sdf_layer_->getVoxelPtrByGlobalIndex(global_index);
+          voxel->is_observed = false;
+          observed_voxels->pop();
+        }
+      }       
+    }
+    response.info_gain.push_back(seq_gains[idx]);
+  }
+  
+  // // pick the best one
+  // int best_idx = std::max_element(seq_gains.begin(), seq_gains.end()) - seq_gains.begin();
+  // std::cout << "BEST IDX:" << best_idx << std::endl;
+  // std::cout << "seq_gains:" << seq_gains[best_idx] << std::endl;
+
+  // // visualization
+  // visualization_msgs::MarkerArray::Ptr gain_vis_msg = boost::make_shared<visualization_msgs::MarkerArray>();
+  // int marker_id = 0;
+  // for (idx = 0; idx < kNumYaw_ * kNumVelZ_ * kNumVelX_; idx++) {
+  //   for (idx2 = 0; idx2 < kNumTimestep; idx2++) {
+  //     visualization_msgs::Marker marker;
+      
+  //     marker.id = marker_id++;
+  //     marker.header.frame_id = world_frame_;
+  //     marker.type = visualization_msgs::Marker::LINE_STRIP;
+  //     marker.action = visualization_msgs::Marker::ADD;
+  //     marker.scale.x = 0.05;
+  //     if (idx == best_idx) {
+  //       marker.color.a = 1.0;
+  //       marker.color.r = 0.0;
+  //       marker.color.g = 1.0;
+  //       marker.color.b = 0.0;
+  //     } else {
+  //       marker.color.a = 0.5;
+  //       marker.color.r = 1.0;
+  //       marker.color.g = 1.0;
+  //       marker.color.b = 0.0;
+  //     }
+      
+  //     geometry_msgs::Point start_point, end_point;
+      
+  //     if (idx2 == 0) {
+  //       start_point.x = request.robot_pose[0];
+  //       start_point.y = request.robot_pose[1];
+  //       start_point.z = request.robot_pose[2];
+  //     } else {
+  //       start_point.x = camera_states_rotated_(idx, 3*idx2 - 3);
+  //       start_point.y = camera_states_rotated_(idx, 3*idx2 - 2);
+  //       start_point.z = camera_states_rotated_(idx, 3*idx2 - 1);
+  //     }
+
+  //     end_point.x = camera_states_rotated_(idx, 3*idx2);
+  //     end_point.y = camera_states_rotated_(idx, 3*idx2 + 1);
+  //     end_point.z = camera_states_rotated_(idx, 3*idx2 + 2);
+  //     marker.points.push_back(start_point);
+  //     marker.points.push_back(end_point);
+  //     gain_vis_msg->markers.push_back(marker);      
+  //   }    
+  // }
+  // gain_vis_pub_.publish(gain_vis_msg);  
   return true;
 }
 

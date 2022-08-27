@@ -29,13 +29,14 @@
 #include <voxblox/utils/color_maps.h>
 #include <voxblox_msgs/FilePath.h>
 #include <voxblox_msgs/InfoGain.h>
+#include <voxblox_msgs/InfoGainBaseline.h>
 #include <voxblox_msgs/Mesh.h>
 
 #include "voxblox_ros/mesh_vis.h"
 #include "voxblox_ros/ptcloud_vis.h"
 #include "voxblox_ros/transformer.h"
 
-// #define TUNE_PARAM_
+
 
 namespace voxblox {
 
@@ -51,17 +52,16 @@ constexpr double kRaycastingHorizontalRes = 5.0 * M_PI/180.0;
 constexpr double kRaycastingVerticalRes = 5.0 * M_PI/180.0;
 constexpr double F_X = 239.35153198242188;
 constexpr double F_Y = 239.05279541015625;
-#ifdef TUNE_PARAM_
-constexpr int kNumYawStep1_ = 16;
-constexpr int kNumYawStep2_ = 3; //32;
-constexpr int kNumYaw_ = kNumYawStep1_ * kNumYawStep2_;
-constexpr int kNumVelZ_ = 8; // IGNORED
+
+// constexpr int kNumYawStep1_ = 16;
+// constexpr int kNumYawStep2_ = 3; //32;
+constexpr int kNumYaw_ = 32; // kNumYawStep1_ * kNumYawStep2_;
+constexpr int kNumVelZ_ = 8;
 constexpr int kNumVelX_ = 1; 
-constexpr int kNumSampleToReplan = 4;
+constexpr int kSkipStepGenerate = 5;
 constexpr int kNumTimestep = 15;
-constexpr double alpha_v = 0.950010681010268;
-constexpr double alpha_psi = 0.953133787077505;
-#endif
+constexpr double alpha_v = 0.92; // Ts=0.4, T_sampling=5/(10*15)
+constexpr double alpha_psi = 0.9293; // Ts=1/K_yaw=1/2.2, T_sampling=5/(10*15)
 
 typedef Eigen::Matrix<double, 6, 1> StateVec;
 
@@ -251,6 +251,9 @@ class TsdfServer {
   bool calcInfoGainCallback(voxblox_msgs::InfoGain::Request& request,
                             voxblox_msgs::InfoGain::Response& response);
 
+  bool baselineInfoGainCallback(voxblox_msgs::InfoGainBaseline::Request& request,
+                                voxblox_msgs::InfoGainBaseline::Response& response);
+
   void computeVolumetricGainRayModelNoBound(StateVec& state,
                                             VolumetricGain& vgain);
 
@@ -300,6 +303,7 @@ class TsdfServer {
 
   // Services.
   ros::ServiceServer calc_info_gain_srv_;
+  ros::ServiceServer baseline_info_gain_srv_;
   ros::ServiceServer generate_mesh_srv_;
   ros::ServiceServer clear_map_srv_;
   ros::ServiceServer save_map_srv_;
@@ -418,11 +422,15 @@ class TsdfServer {
   double decay_distance_ = 5.0;
   double area_factor_ = 1e5;
 
-#ifdef TUNE_PARAM_
   // action sequence lib 
-  Eigen::Matrix<double, kNumYaw_ * kNumVelX_, 6 * kNumTimestep> robot_states_;
-  Eigen::Matrix<double, kNumYaw_ * kNumVelX_, 3 * kNumTimestep> action_sequences_;
-#endif  
+  // Eigen::Matrix<double, kNumYaw_ * kNumVelZ_ * kNumVelX_, 6 * kNumTimestep> camera_states_;
+  // Eigen::Matrix<double, kNumYaw_ * kNumVelZ_ * kNumVelX_, 3 * kNumTimestep> action_sequences_;
+  Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> camera_states_ =
+      Eigen::MatrixXd::Zero(kNumYaw_ * kNumVelZ_ * kNumVelX_, 6 * kNumTimestep);
+  Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> camera_states_rotated_ =
+      Eigen::MatrixXd::Zero(kNumYaw_ * kNumVelZ_ * kNumVelX_, 3 * kNumTimestep); // rotate camera_states_ to align with the current robot's yaw
+  Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> action_sequences_ = 
+      Eigen::MatrixXd::Zero(kNumYaw_ * kNumVelZ_ * kNumVelX_, 3 * kNumTimestep);
 };
 
 }  // namespace voxblox
