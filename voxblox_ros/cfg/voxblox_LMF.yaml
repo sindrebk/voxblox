@@ -1,0 +1,48 @@
+world_frame: world
+use_tf_transforms: True
+use_freespace_pointcloud: False #True
+tsdf_voxels_per_side: 16 # Size of the block in voxblox
+tsdf_voxel_size: 0.2
+max_ray_length_m: 15.0
+truncation_distance: 0.4
+voxel_carving_enabled: True
+color_mode: "height"
+verbose: False
+
+update_mesh_every_n_sec: 2.0 # markers will not be visualized in rviz, but the tsdf will still work
+
+# update_map_every_n_sec: 4.0 # unknown
+mesh_min_weight: 0.0001
+slice_level: 1.0
+method: "fast"
+integration_order_mode: "sorted"
+# max_consecutive_ray_collisions: 2
+# start_voxel_subsampling_factor: 2
+publish_pointclouds: True
+publish_pointclouds_on_update: False #True
+allow_clear: True
+pointcloud_queue_size: 5
+min_time_between_msgs_sec: 0.0
+#max_block_distance_from_body: FLT_MAX
+publish_tsdf_info: False
+publish_slices: False
+publish_traversable: False
+traversability_radius: 0.4
+enable_icp: False
+icp_refine_roll_pitch: False
+accumulate_icp_corrections: True # check
+timestamp_tolerance_sec: 0.001
+publish_tsdf_map: True
+
+# OVERLAP BETWEEN VERSIONS #
+use_const_weight: True # check
+use_weight_dropoff: True
+
+# for decaying interestingness to unknown neighbor voxels
+decay_lambda: 0.9 #0.9 # 0.0 - 1.0
+decay_distance: 3.0 # 0.0: disable
+area_factor: 1000 #10000 # exp(-area_factor * z^2 / (fx * fy))
+# kNumYawStep1: 16
+# kNumYawStep2: 4
+# kNumVelZ: 8 # IGNORED
+# kNumVelX: 1
