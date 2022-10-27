@@ -13,6 +13,7 @@ struct TsdfVoxel {
   float distance = 0.0f;
   float weight = 0.0f;
   Color color;
+  uint8_t label = 0u;
 };
 
 struct EsdfVoxel {
@@ -32,6 +33,9 @@ struct EsdfVoxel {
    * or in the fixed frontier.
    */
   Eigen::Vector3i parent = Eigen::Vector3i::Zero();
+
+  /** Id of the object detected in the voxel*/
+  uint8_t label = 0u;
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
