@@ -13,7 +13,9 @@ struct TsdfVoxel {
   float distance = 0.0f;
   float weight = 0.0f;
   Color color;
+  /** Id of the object detected in the voxel*/
   uint8_t label = 0u;
+  uint16_t num_detections = 0u;
 };
 
 struct EsdfVoxel {
@@ -36,6 +38,7 @@ struct EsdfVoxel {
 
   /** Id of the object detected in the voxel*/
   uint8_t label = 0u;
+  uint16_t num_detections = 0u;
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
