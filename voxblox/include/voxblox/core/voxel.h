@@ -13,6 +13,10 @@ struct TsdfVoxel {
   float distance = 0.0f;
   float weight = 0.0f;
   Color color;
+
+  // detection labels
+  uint8_t label = 0u;
+  uint16_t num_observations = 0u;
 };
 
 struct EsdfVoxel {
@@ -26,6 +30,10 @@ struct EsdfVoxel {
   bool hallucinated = false;
   bool in_queue = false;
   bool fixed = false;
+
+  // detection labels
+  uint8_t label = 0u;
+  uint16_t num_observations = 0u;
 
   /**
    * Relative direction toward parent. If itself, then either uninitialized
